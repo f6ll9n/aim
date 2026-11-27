@@ -20,14 +20,7 @@ target_link_libraries(screen_capture PRIVATE d3d11 dxgi)
 
 if(OpenCV_FOUND)
     # ONNX Runtime (prebuilt DirectML) — ускорение инференса на AMD/NVIDIA GPU.
-    # Путь можно передать через -DORT_ROOT=... или переменную окружения ORT_ROOT.
-    if(NOT DEFINED ORT_ROOT)
-        if(DEFINED ENV{ORT_ROOT})
-            set(ORT_ROOT "$ENV{ORT_ROOT}")
-        else()
-            set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime-directml")
-        endif()
-    endif()
+    set(ORT_ROOT "C:/Users/f6ll9n/onnxruntime-directml")
 
     # ImGui (vendored) + DX11/win32 backends — меню настроек.
     set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui-1.91.9")
@@ -43,11 +36,11 @@ if(OpenCV_FOUND)
         ${IMGUI_DIR}/imgui_widgets.cpp
         ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
         ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
-    # только core+imgproc — код использует cv::Mat/cv::resize, остальные модули не нужны
-    # и тянут лишние кодеки (jpeg/png/webp/tiff/z/lzma).
+    # только core+imgproc — код юзает cv::Mat/cv::resize, остальные модули не нужны
+    # и тащат кучу кодеков (jpeg/png/webp/tiff/z/lzma). не раздувай, хуй с ним.
     target_link_libraries(capture_demo PRIVATE
         screen_capture opencv_core opencv_imgproc user32 gdi32 onnxruntime
-        d3d11 dxgi d3dcompiler)
+        d3d11 dxgi d3dcompiler d2d1 dwrite dcomp)
     target_include_directories(capture_demo PRIVATE
         ${OpenCV_INCLUDE_DIRS} "." "${ORT_ROOT}/build/native/include"
         "${IMGUI_DIR}" "${IMGUI_DIR}/backends")

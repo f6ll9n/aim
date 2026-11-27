@@ -3,56 +3,58 @@
 #include <atomic>
 #include "Settings.h"
 
-// форварды, чтоб не тащить тяжёлые инклюды
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct IDXGISwapChain;
 struct ID3D11RenderTargetView;
 
 // ============================================================================
-//  Menu — своё topmost-окно на дх11 с имгуи (тёмная тема).
-//
-//  GDI-оверлей с боксами не трогает: меню живёт в отдельном окне и вылазит по N.
-//  открытое — тыкабельное (слайдеры/ребинд), закрытое — спрятано.
+//  Menu — Skeet / GameSense-стиль меню на DX11 + ImGui.
+//  По умолчанию использует WS_EX_NOACTIVATE + MA_NOACTIVATE: открывается поверх
+//  игры (в режиме без рамок / окне), не перехватывая фокус и не сворачивая её.
 // ============================================================================
 class Menu
 {
 public:
+    enum class Action { None, Save, Load, Unload };
+
     Menu() = default;
     ~Menu();
 
-    // девайс дх11 + окно + имгуи. screenW/H для центровки.
     bool Create(HINSTANCE hInst, int screenW, int screenH);
 
     void Destroy();
-    void Toggle() { SetVisible(!m_visible); }
-    void SetVisible(bool v);
-    bool IsVisible() const noexcept { return m_visible; }
-    HWND Handle()  const noexcept { return m_hwnd; }
+    void Toggle(bool grabFocus = false) { SetVisible(!m_visible, grabFocus); }
+    void SetVisible(bool v, bool grabFocus = false);
+    bool IsVisible()   const noexcept { return m_visible; }
+    bool IsListening() const noexcept { return m_listening; }
+    HWND Handle()      const noexcept { return m_hwnd; }
 
-    // кадр меню. conf — порог, шарят с потоком инференса.
-    void Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& info);
+    Action Render(AimSettings& s,
+                  std::atomic<float>& conf,
+                  std::atomic<float>& iou,
+                  const RuntimeInfo& info);
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     bool CreateDeviceAndSwapChain();
     void SetStyle();
-    void TextKeyBind(const char* label, int* key);   // строка ребинда
+    void KeyBindTag(int* key, bool allowClear);
 
-    HINSTANCE m_hInst  = nullptr;
-    HWND      m_hwnd   = nullptr;
+    HINSTANCE m_hInst   = nullptr;
+    HWND      m_hwnd    = nullptr;
     bool      m_visible = false;
+    bool      m_grabFocus = false;
 
-    ID3D11Device*            m_device = nullptr;
-    ID3D11DeviceContext*     m_ctx    = nullptr;
-    IDXGISwapChain*          m_swap   = nullptr;
-    ID3D11RenderTargetView*  m_rtv    = nullptr;
+    ID3D11Device*           m_device = nullptr;
+    ID3D11DeviceContext*    m_ctx    = nullptr;
+    IDXGISwapChain*         m_swap   = nullptr;
+    ID3D11RenderTargetView* m_rtv    = nullptr;
 
-    int m_w = 540, m_h = 580;
+    int m_w = 660, m_h = 540;
 
-    // ребинд: пока listening — ждём нажатия и пишем в *m_listenTarget.
     bool  m_listening     = false;
     int*  m_listenTarget  = nullptr;
-    bool  m_listenActive  = false;      // снимок клавы уже снят
-    int   m_snapshot[256] = { 0 };      // че было зажато на старте
+    bool  m_listenActive  = false;
+    int   m_snapshot[256] = { 0 };
 };

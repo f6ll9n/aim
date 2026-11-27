@@ -1,13 +1,22 @@
 #pragma once
 #include <Windows.h>
+#include <cstdint>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#pragma push_macro("DrawText")
+#undef DrawText
+#include <d2d1_1.h>
+#include <dwrite.h>
+#pragma pop_macro("DrawText")
+#include <dcomp.h>
+#include <wrl/client.h>
 
 // ============================================================================
-//  Overlay — прозрачное окно поверх игры (topmost + click-through).
+//  Overlay — прозрачное аппаратное окно поверх игры (Direct2D + DirectComposition).
 //
-//  Техника: layered window с цветовым ключом (magenta RGB(255,0,255)).
-//  Фон красится ключевым цветом -> полностью прозрачен; то, что рисуем
-//  поверх (боксы/текст), отображается. Окно не перехватывает ввод
-//  (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE), т.е. играть можно как обычно.
+//  Работает на GPU без CPU-копирования и без GDI UpdateLayeredWindow:
+//  WS_EX_NOREDIRECTIONBITMAP + FLIP_SEQUENTIAL + DXGI_ALPHA_MODE_PREMULTIPLIED.
+//  Окно не перехватывает ввод (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | HTTRANSPARENT).
 // ============================================================================
 class Overlay
 {
@@ -15,41 +24,47 @@ public:
     Overlay() = default;
     ~Overlay();
 
-    // Создать окно-оверлей, покрывающее заданный прямоугольник экрана.
     bool Create(HINSTANCE hInst, const RECT& screenRect, const wchar_t* title = L"Overlay");
     void Destroy();
 
-    void BeginDraw();                     // очистить кадр (прозрачный фон)
-    void EndDraw();                       // применить к окну (UpdateLayeredWindow)
+    void BeginDraw();
+    void EndDraw();
 
-    void DrawRect(int x, int y, int w, int h, COLORREF color, int thickness = 2);
-    void DrawFilledRect(int x, int y, int w, int h, COLORREF color);
-    void DrawLine(int x1, int y1, int x2, int y2, COLORREF color, int thickness = 1);
-    void DrawText(int x, int y, const wchar_t* text, int height, COLORREF color, bool bold = true);
+    void DrawRect(int x, int y, int w, int h, COLORREF color, int thickness = 2, uint8_t alpha = 255);
+    void DrawFilledRect(int x, int y, int w, int h, COLORREF color, uint8_t alpha = 255);
+    void DrawLine(int x1, int y1, int x2, int y2, COLORREF color, int thickness = 1, uint8_t alpha = 255);
+    void DrawText(int x, int y, const wchar_t* text, int height, COLORREF color, bool bold = true, uint8_t alpha = 255);
 
     HINSTANCE Instance() const noexcept { return m_hInst; }
     HWND Handle()   const noexcept { return m_hwnd; }
     int   Width()   const noexcept { return m_width; }
     int   Height()  const noexcept { return m_height; }
 
-    // DEBUG: дамп сырых пикселей текущего кадра (диагностика отрисовки).
-    bool DumpRaw(const wchar_t* path) const;
-
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+    bool InitDirect2D();
 
-    HINSTANCE m_hInst = nullptr;
-    HWND      m_hwnd  = nullptr;
-    int       m_width = 0;
+    HINSTANCE m_hInst  = nullptr;
+    HWND      m_hwnd   = nullptr;
+    int       m_width  = 0;
     int       m_height = 0;
 
-    HDC       m_memDC  = nullptr;
-    HBITMAP   m_dib    = nullptr;
-    void*     m_bits   = nullptr;
-    HGDIOBJ   m_oldGdi = nullptr;
-    HFONT     m_font   = nullptr;
-    HFONT     m_txtFont = nullptr;   // кешированный шрифт для DrawText
-    int       m_txtH    = 0;
-    bool      m_txtBold = false;
-    COLORREF  m_key = RGB(255, 0, 255);   // прозрачный фон
+    Microsoft::WRL::ComPtr<ID3D11Device>           m_d3dDevice;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext>    m_d3dCtx;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1>        m_swapChain;
+
+    Microsoft::WRL::ComPtr<ID2D1Factory1>          m_d2dFactory;
+    Microsoft::WRL::ComPtr<ID2D1Device>            m_d2dDevice;
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext>     m_d2dCtx;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1>           m_targetBitmap;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>   m_brush;
+
+    Microsoft::WRL::ComPtr<IDWriteFactory>         m_dwrite;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat>      m_textFormat;
+    int                                            m_txtH    = 0;
+    bool                                           m_txtBold = false;
+
+    Microsoft::WRL::ComPtr<IDCompositionDevice>    m_dcompDevice;
+    Microsoft::WRL::ComPtr<IDCompositionTarget>    m_dcompTarget;
+    Microsoft::WRL::ComPtr<IDCompositionVisual>    m_dcompVisual;
 };

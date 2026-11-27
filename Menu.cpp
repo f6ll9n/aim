@@ -9,45 +9,32 @@
 
 #include <string>
 #include <cstdio>
+#include <algorithm>
 
-// ============================================================================
-//  меню на имгуи + дх11. без рамки, тёмная тема, сегов кириллица. лезет по N,
-//  пока открыта — тыкабельная.
-// ============================================================================
-
-// прокидываю обработчик вхин32, иначе windows.h лезет в хедер имгуи. не трогать
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace
 {
     const wchar_t* kMenuClass = L"BionicAimMenuClass";
 
-    // кислотный лаймовый акцент, чуть приглушённый (потемнее рефа)
-    ImVec4 Accent(float a = 1.f)       { return ImVec4(0.44f, 0.62f, 0.16f, a); }
-    ImVec4 AccentBright(float a = 1.f) { return ImVec4(0.58f, 0.80f, 0.26f, a); }
-
-    // шрифт с иконками. грузится один раз, не загрузился — откат на текстовые кнопки
     ImFont* g_iconFont = nullptr;
-
-    // жирный для заголовков/лого
     ImFont* g_boldFont = nullptr;
+    ImFont* g_smallBold = nullptr;
 
-    // иконки фа-солид, коды в утф8
     constexpr const char* ICON_AIM    = "\xEF\x81\x9B";  // crosshairs  U+F05B
     constexpr const char* ICON_VISUAL = "\xEF\x81\xAE";  // eye         U+F06E
-    constexpr const char* ICON_KEYS   = "\xEF\x84\x9C";  // keyboard    U+F11C
-    constexpr const char* ICON_INFO   = "\xEF\x81\x9A";  // circle-info U+F05A
+    constexpr const char* ICON_GEARS  = "\xEF\x82\x85";  // gears       U+F085
+    constexpr const char* ICON_USER   = "\xEF\x80\x87";  // user        U+F007
 
-    // тащим только эти глифы, иначе атлас толстеет
     static const ImWchar kIconRanges[] =
     {
-        0xF05A, 0xF05B,
+        0xF007, 0xF007,
+        0xF05B, 0xF05B,
         0xF06E, 0xF06E,
-        0xF11C, 0xF11C,
+        0xF085, 0xF085,
         0,
     };
 
-    // где exe, там и шрифт
     static std::string ExeDir()
     {
         char buf[MAX_PATH];
@@ -61,179 +48,370 @@ namespace
         return s.substr(0, pos + 1);
     }
 
-    // жирный белый заголовок секции (как название панели на рефе)
-    void SectionHeader(const char* title)
+    // --- состояние текущего групбокса (чтобы колонки не пересекались) ---
+    struct GroupBoxState
     {
-        if (g_boldFont) ImGui::PushFont(g_boldFont);
-        ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.95f, 1.0f), "%s", title);
-        if (g_boldFont) ImGui::PopFont();
+        ImVec2      p0{};
+        float       width  = 250.0f;
+        float       innerW = 222.0f;
+        const char* title  = "";
+    };
+    static GroupBoxState g_box;
+
+    void BeginGroupBox(const char* title, float width)
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->ChannelsSplit(2);
+        dl->ChannelsSetCurrent(1);
+
+        g_box.p0     = ImGui::GetCursorScreenPos();
+        g_box.width  = width;
+        g_box.innerW = width - 28.0f;
+        g_box.title  = title;
+
+        ImGui::BeginGroup();
+        ImGui::Indent(14.0f);
+        ImGui::PushItemWidth(g_box.innerW);
+        ImGui::Dummy(ImVec2(g_box.innerW, 10.0f));
     }
 
-    // панель-бокс с тонкой рамкой и белым заголовком. высота растёт сама.
-    void BeginPanel(const char* title)
+    void EndGroupBox()
     {
-        ImGui::BeginChild(title, ImVec2(0, 0),
-                          ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 12));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 8));
-        SectionHeader(title);
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(g_box.innerW, 6.0f));
+        ImGui::PopItemWidth();
+        ImGui::Unindent(14.0f);
+        ImGui::EndGroup();
+
+        float maxY = ImGui::GetItemRectMax().y;
+        ImVec2 p0  = g_box.p0;
+        ImVec2 p1(p0.x + g_box.width, maxY);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->ChannelsSetCurrent(0);
+        dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 20, 255));
+
+        dl->ChannelsSetCurrent(1);
+        dl->AddRect(p0, p1, IM_COL32(42, 42, 42, 255));
+        dl->AddRect(ImVec2(p0.x + 1.0f, p0.y + 1.0f),
+                    ImVec2(p1.x - 1.0f, p1.y - 1.0f),
+                    IM_COL32(10, 10, 10, 255));
+
+        // Заголовок разрывает верхнюю рамку (фирменный стиль рефа).
+        if (g_smallBold) ImGui::PushFont(g_smallBold);
+        ImVec2 ts = ImGui::CalcTextSize(g_box.title);
+        float tx = p0.x + 12.0f;
+        float ty = p0.y - ts.y * 0.5f;
+        dl->AddRectFilled(ImVec2(tx - 4.0f, p0.y - 2.0f),
+                          ImVec2(tx + ts.x + 4.0f, p0.y + 3.0f),
+                          IM_COL32(20, 20, 20, 255));
+        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, 230), g_box.title);
+        dl->AddText(ImVec2(tx, ty), IM_COL32(226, 226, 226, 255), g_box.title);
+        if (g_smallBold) ImGui::PopFont();
+
+        dl->ChannelsMerge();
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + 14.0f));
     }
 
-    void EndPanel()
-    {
-        ImGui::PopStyleVar();   // ItemSpacing
-        ImGui::PopStyleVar();   // WindowPadding
-        ImGui::EndChild();
-        ImGui::Spacing();
-    }
-
-    // слайдер: серая дорожка с рамкой, зелёная заливка слева, белый хэндл
-    // с тёмной обводкой по центру. тянется мышью, хэндл на границе заливки.
-    bool SlideFill(const char* id, float* v, float mn, float mx)
+    // Чекбокс 9x9: кислотный градиент при включении + 1px чёрная обводка.
+    bool SkeetCheck(const char* id, const char* label, bool* v, bool* outHovered = nullptr)
     {
         bool changed = false;
-        const float h      = 16.0f;   // высота зоны клика
-        const float trackH = 6.0f;    // толщина полосы
-        const float knob   = 8.0f;    // сторона белого хэндла
-
+        const float boxSz = 9.0f;
+        const float padX  = 11.0f;
         ImVec2 p = ImGui::GetCursorScreenPos();
-        float  w = ImGui::GetContentRegionAvail().x;
+        ImVec2 ts = ImGui::CalcTextSize(label);
+        float rowH = (ts.y > boxSz) ? ts.y : boxSz;
 
-        ImGui::InvisibleButton(id, ImVec2(w, h));
+        ImGui::InvisibleButton(id, ImVec2(boxSz + padX + ts.x, rowH));
+        if (ImGui::IsItemClicked()) { *v = !*v; changed = true; }
+        bool hovered = ImGui::IsItemHovered();
+        if (outHovered) *outHovered = hovered;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float by = p.y + (rowH - boxSz) * 0.5f;
+        ImVec2 b0(p.x, by), b1(p.x + boxSz, by + boxSz);
+
+        if (*v)
+        {
+            dl->AddRectFilledMultiColor(b0, b1,
+                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
+                IM_COL32(104, 154, 22, 255), IM_COL32(104, 154, 22, 255));
+        }
+        else
+        {
+            dl->AddRectFilledMultiColor(b0, b1,
+                IM_COL32(48, 48, 48, 255), IM_COL32(48, 48, 48, 255),
+                IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255));
+        }
+        dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
+                    ImVec2(b1.x + 1.0f, b1.y + 1.0f),
+                    hovered ? IM_COL32(75, 75, 75, 255) : IM_COL32(8, 8, 8, 255));
+
+        ImU32 txtCol = *v ? IM_COL32(218, 218, 218, 255) : IM_COL32(165, 165, 165, 255);
+        dl->AddText(ImVec2(p.x + boxSz + padX + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+        dl->AddText(ImVec2(p.x + boxSz + padX, p.y), txtCol, label);
+        return changed;
+    }
+
+    // Слайдер в стиле рефа: подпись сверху, тонкая полоса, лаймовый градиент, цифра на краю заливки.
+    bool SkeetSliderF(const char* label, const char* id, float* v, float mn, float mx, const char* fmt)
+    {
+        bool changed = false;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        ImVec2 lp = ImGui::GetCursorScreenPos();
+        float xOff = lp.x + 20.0f;  // отступ слева как у текста чекбокса
+        float w    = g_box.innerW - 20.0f;
+
+        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, 255), label);
+
+        const float labelH = ImGui::GetTextLineHeight();
+        const float barY   = lp.y + labelH + 3.0f;
+        const float barH   = 7.0f;
+        const float hitH   = 14.0f;
+
+        ImGui::SetCursorScreenPos(ImVec2(xOff, barY - 3.0f));
+        ImGui::InvisibleButton(id, ImVec2(w, hitH));
         if (ImGui::IsItemActive())
         {
-            float f = (ImGui::GetIO().MousePos.x - p.x) / w;
-            if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+            float f = (ImGui::GetIO().MousePos.x - xOff) / w;
+            f = std::clamp(f, 0.0f, 1.0f);
             float nv = mn + f * (mx - mn);
             if (nv != *v) { *v = nv; changed = true; }
         }
-        bool active  = ImGui::IsItemActive();
-        bool hovered = ImGui::IsItemHovered();
+        bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
 
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float ty = p.y + (h - trackH) * 0.5f;
-        ImVec2 t0(p.x, ty), t1(p.x + w, ty + trackH);
+        ImVec2 t0(xOff, barY), t1(xOff + w, barY + barH);
+        dl->AddRectFilledMultiColor(t0, t1,
+            IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255),
+            IM_COL32(46, 46, 46, 255), IM_COL32(46, 46, 46, 255));
 
-        // дорожка (тёмная + тонкая рамка)
-        dl->AddRectFilled(t0, t1, ImGui::GetColorU32(ImVec4(0.12f, 0.12f, 0.13f, 1.0f)), 3.0f);
-        dl->AddRect(t0, t1, ImGui::GetColorU32(ImVec4(0.20f, 0.20f, 0.22f, 1.0f)), 3.0f, 0, 1.0f);
+        float frac = std::clamp((*v - mn) / (mx - mn), 0.0f, 1.0f);
+        float fillX = xOff + frac * w;
+        if (fillX > xOff + 1.0f)
+        {
+            dl->AddRectFilledMultiColor(t0, ImVec2(fillX, barY + barH),
+                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
+                IM_COL32(102, 152, 20, 255), IM_COL32(102, 152, 20, 255));
+        }
+        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f),
+                    ImVec2(t1.x + 1.0f, t1.y + 1.0f),
+                    hovered ? IM_COL32(68, 68, 68, 255) : IM_COL32(8, 8, 8, 255));
 
-        float f = (*v - mn) / (mx - mn);
-        if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
-        float fillX = p.x + f * w;
+        // Маленькие '-' и '+' по бокам как на рефе
+        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "-");
+        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "+");
 
-        // зелёная заливка слева до хэндла
-        if (fillX > p.x + 1.0f)
-            dl->AddRectFilled(t0, ImVec2(fillX, ty + trackH), ImGui::GetColorU32(Accent()), 3.0f);
-
-        // белый хэндл с тёмной обводкой, при ховере/драге чуть крупнее
-        ImVec2 kc(fillX, p.y + h * 0.5f);
-        float hs = (hovered || active) ? knob + 2.0f : knob;
-        dl->AddRectFilled(ImVec2(kc.x - hs * 0.5f, kc.y - hs * 0.5f),
-                          ImVec2(kc.x + hs * 0.5f, kc.y + hs * 0.5f),
-                          IM_COL32(235, 236, 238, 255), 2.0f);
-        dl->AddRect(ImVec2(kc.x - hs * 0.5f, kc.y - hs * 0.5f),
-                    ImVec2(kc.x + hs * 0.5f, kc.y + hs * 0.5f),
-                    IM_COL32(28, 28, 30, 255), 2.0f, 0, 1.5f);
-        return changed;
-    }
-
-    // слайдер: подпись и значение сверху, полоса ниже — чтоб цифры не лезли на ползунок
-    bool LabeledSliderF(const char* label, const char* id, float* v, float mn, float mx, const char* fmt)
-    {
-        ImGui::TextUnformatted(label);
         char buf[32];
         std::snprintf(buf, sizeof(buf), fmt, *v);
         ImVec2 vs = ImGui::CalcTextSize(buf);
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - vs.x);
-        ImGui::TextColored(AccentBright(), "%s", buf);
-        ImGui::PushID(id);
-        bool changed = SlideFill("##v", v, mn, mx);
-        ImGui::PopID();
+        float vx = std::clamp(fillX - vs.x * 0.5f, xOff, xOff + w - vs.x);
+        float vy = barY + (barH - vs.y) * 0.5f;
+        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, 255), buf);
+        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, 200), buf);
+        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, 255), buf);
+
+        ImGui::SetCursorScreenPos(ImVec2(lp.x, barY + barH + 7.0f));
         return changed;
     }
 
-    bool LabeledSliderI(const char* label, const char* id, int* v, int mn, int mx, const char* fmt)
+    bool SkeetSliderI(const char* label, const char* id, int* v, int mn, int mx, const char* fmt, const char* maxText = nullptr)
     {
-        ImGui::TextUnformatted(label);
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), fmt, *v);
-        ImVec2 vs = ImGui::CalcTextSize(buf);
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - vs.x);
-        ImGui::TextColored(AccentBright(), "%s", buf);
-        ImGui::PushID(id);
         float fv = static_cast<float>(*v);
-        bool changed = SlideFill("##v", &fv, static_cast<float>(mn), static_cast<float>(mx));
-        if (changed) *v = static_cast<int>(fv + 0.5f);
-        ImGui::PopID();
-        return changed;
-    }
-
-    // квадратный чекбокс: вкл = залит кислотой, БЕЗ галочки. как на рефе.
-    bool CheckBox(const char* id, const char* label, bool* v)
-    {
         bool changed = false;
-        const float s = 14.0f;
-        ImVec2 p = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        ImGui::InvisibleButton(id, ImVec2(s, s));
-        if (ImGui::IsItemClicked()) { *v = !*v; changed = true; }
-        bool hovered = ImGui::IsItemHovered();
+        ImVec2 lp = ImGui::GetCursorScreenPos();
+        float xOff = lp.x + 20.0f;
+        float w    = g_box.innerW - 20.0f;
 
-        ImVec2 p2(p.x + s, p.y + s);
-        ImVec4 fill = *v ? Accent() : ImVec4(0.11f, 0.11f, 0.12f, 1.0f);
-        dl->AddRectFilled(p, p2, ImGui::GetColorU32(fill), 2.0f);
-        dl->AddRect(p, p2, ImGui::GetColorU32(ImVec4(0.22f, 0.22f, 0.24f, 1.0f)), 2.0f, 0, 1.0f);
-        if (hovered)
-            dl->AddRect(p, p2, IM_COL32(255, 255, 255, 30), 2.0f, 0, 1.0f);
+        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, 255), label);
 
-        ImVec2 ts = ImGui::CalcTextSize(label);
-        dl->AddText(ImVec2(p.x + s + 9.0f, p.y + (s - ts.y) * 0.5f),
-                    ImGui::GetColorU32(*v ? ImVec4(0.90f, 0.92f, 0.94f, 1.0f)
-                                          : ImVec4(0.70f, 0.70f, 0.72f, 1.0f)), label);
+        const float labelH = ImGui::GetTextLineHeight();
+        const float barY   = lp.y + labelH + 3.0f;
+        const float barH   = 7.0f;
+        const float hitH   = 14.0f;
+
+        ImGui::SetCursorScreenPos(ImVec2(xOff, barY - 3.0f));
+        ImGui::InvisibleButton(id, ImVec2(w, hitH));
+        if (ImGui::IsItemActive())
+        {
+            float f = (ImGui::GetIO().MousePos.x - xOff) / w;
+            f = std::clamp(f, 0.0f, 1.0f);
+            int nv = static_cast<int>(mn + f * (mx - mn) + 0.5f);
+            if (nv != *v) { *v = nv; changed = true; }
+        }
+        bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
+
+        ImVec2 t0(xOff, barY), t1(xOff + w, barY + barH);
+        dl->AddRectFilledMultiColor(t0, t1,
+            IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255),
+            IM_COL32(46, 46, 46, 255), IM_COL32(46, 46, 46, 255));
+
+        float frac = std::clamp((fv - mn) / static_cast<float>(mx - mn), 0.0f, 1.0f);
+        float fillX = xOff + frac * w;
+        if (fillX > xOff + 1.0f)
+        {
+            dl->AddRectFilledMultiColor(t0, ImVec2(fillX, barY + barH),
+                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
+                IM_COL32(102, 152, 20, 255), IM_COL32(102, 152, 20, 255));
+        }
+        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f),
+                    ImVec2(t1.x + 1.0f, t1.y + 1.0f),
+                    hovered ? IM_COL32(68, 68, 68, 255) : IM_COL32(8, 8, 8, 255));
+
+        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "-");
+        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "+");
+
+        char buf[32];
+        if (maxText && *v >= mx)
+            std::snprintf(buf, sizeof(buf), "%s", maxText);
+        else
+            std::snprintf(buf, sizeof(buf), fmt, *v);
+
+        ImVec2 vs = ImGui::CalcTextSize(buf);
+        float vx = std::clamp(fillX - vs.x * 0.5f, xOff, xOff + w - vs.x);
+        float vy = barY + (barH - vs.y) * 0.5f;
+        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, 255), buf);
+        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, 200), buf);
+        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, 255), buf);
+
+        ImGui::SetCursorScreenPos(ImVec2(lp.x, barY + barH + 7.0f));
         return changed;
     }
 
-    // вкладка навигации: прямоугольный блок, активная — белая иконка
-    bool NavButton(const char* id, const char* label, const ImVec2& size, bool active)
+    bool SkeetButton(const char* label, float height = 24.0f)
     {
-        bool clicked = false;
         ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton(id, size);
+        float xOff = p.x + 20.0f;
+        float w    = g_box.innerW - 20.0f;
+
+        ImGui::SetCursorScreenPos(ImVec2(xOff, p.y));
+        bool clicked = ImGui::InvisibleButton(label, ImVec2(w, height));
         bool hovered = ImGui::IsItemHovered();
-        clicked      = ImGui::IsItemClicked();
+        bool active  = ImGui::IsItemActive();
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 p2(p.x + size.x, p.y + size.y);
+        ImVec2 b0(xOff, p.y), b1(xOff + w, p.y + height);
 
-        ImVec4 bg, txt;
-        if (active)       { bg = ImVec4(0.15f, 0.15f, 0.15f, 1.0f); txt = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); }
-        else if (hovered) { bg = ImVec4(0.12f, 0.12f, 0.12f, 1.0f); txt = ImVec4(0.70f, 0.70f, 0.70f, 1.0f); }
-        else              { bg = ImVec4(0.09f, 0.09f, 0.09f, 1.0f); txt = ImVec4(0.45f, 0.45f, 0.45f, 1.0f); }
+        ImU32 topC = active  ? IM_COL32(28, 28, 28, 255)
+                   : hovered ? IM_COL32(46, 46, 46, 255)
+                             : IM_COL32(38, 38, 38, 255);
+        ImU32 botC = active  ? IM_COL32(22, 22, 22, 255)
+                   : hovered ? IM_COL32(34, 34, 34, 255)
+                             : IM_COL32(26, 26, 26, 255);
 
-        dl->AddRectFilled(p, p2, ImGui::GetColorU32(bg), 2.0f);
+        dl->AddRectFilledMultiColor(b0, b1, topC, topC, botC, botC);
+        dl->AddRect(b0, b1, IM_COL32(52, 52, 52, 255));
+        dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
+                    ImVec2(b1.x + 1.0f, b1.y + 1.0f),
+                    IM_COL32(8, 8, 8, 255));
 
+        if (g_smallBold) ImGui::PushFont(g_smallBold);
         ImVec2 ts = ImGui::CalcTextSize(label);
-        dl->AddText(ImVec2(p.x + (size.x - ts.x) * 0.5f, p.y + (size.y - ts.y) * 0.5f),
-                    ImGui::GetColorU32(txt), label);
+        float tx = xOff + (w - ts.x) * 0.5f;
+        float ty = p.y  + (height - ts.y) * 0.5f;
+        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, 220), label);
+        dl->AddText(ImVec2(tx, ty), IM_COL32(220, 220, 220, 255), label);
+        if (g_smallBold) ImGui::PopFont();
+
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + height + 6.0f));
         return clicked;
     }
 
+    bool SkeetCombo(const char* id, const char* label, int* current, const char* const items[], int count)
+    {
+        bool changed = false;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float xOff = p.x + 20.0f;
+        float w    = g_box.innerW - 20.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        if (label && label[0])
+        {
+            dl->AddText(ImVec2(xOff + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+            dl->AddText(ImVec2(xOff, p.y), IM_COL32(204, 204, 204, 255), label);
+            p.y += ImGui::GetTextLineHeight() + 3.0f;
+        }
+
+        const float h = 21.0f;
+        ImGui::SetCursorScreenPos(ImVec2(xOff, p.y));
+        if (ImGui::InvisibleButton(id, ImVec2(w, h)))
+            ImGui::OpenPopup(id);
+        bool hovered = ImGui::IsItemHovered();
+
+        ImVec2 b0(xOff, p.y), b1(xOff + w, p.y + h);
+        dl->AddRectFilledMultiColor(b0, b1,
+            hovered ? IM_COL32(40, 40, 40, 255) : IM_COL32(32, 32, 32, 255),
+            hovered ? IM_COL32(40, 40, 40, 255) : IM_COL32(32, 32, 32, 255),
+            IM_COL32(24, 24, 24, 255), IM_COL32(24, 24, 24, 255));
+        dl->AddRect(b0, b1, IM_COL32(46, 46, 46, 255));
+        dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
+                    ImVec2(b1.x + 1.0f, b1.y + 1.0f),
+                    IM_COL32(8, 8, 8, 255));
+
+        const char* curTxt = (*current >= 0 && *current < count) ? items[*current] : "";
+        ImVec2 ts = ImGui::CalcTextSize(curTxt);
+        dl->AddText(ImVec2(xOff + 8.0f, p.y + (h - ts.y) * 0.5f),
+                    IM_COL32(190, 190, 190, 255), curTxt);
+
+        // Треугольник стрелки справа
+        float ax = b1.x - 11.0f, ay = p.y + h * 0.5f - 1.5f;
+        dl->AddTriangleFilled(ImVec2(ax - 3.5f, ay),
+                              ImVec2(ax + 3.5f, ay),
+                              ImVec2(ax, ay + 4.0f),
+                              IM_COL32(140, 140, 140, 255));
+
+        ImGui::SetNextWindowPos(ImVec2(xOff, p.y + h + 1.0f));
+        ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
+        if (ImGui::BeginPopup(id, ImGuiWindowFlags_NoMove))
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                bool sel = (i == *current);
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    sel ? ImVec4(0.60f, 0.87f, 0.16f, 1.0f) : ImVec4(0.78f, 0.78f, 0.78f, 1.0f));
+                if (ImGui::Selectable(items[i], sel))
+                {
+                    *current = i;
+                    changed = true;
+                }
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndPopup();
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p.x - 20.0f, p.y + h + 7.0f));
+        return changed;
+    }
+
+    void SkeetInfoRow(const char* label, const char* value, ImU32 valCol)
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 vs = ImGui::CalcTextSize(value);
+
+        dl->AddText(ImVec2(p.x + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+        dl->AddText(ImVec2(p.x, p.y), IM_COL32(175, 175, 175, 255), label);
+
+        float vx = p.x + g_box.innerW - vs.x;
+        dl->AddText(ImVec2(vx + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 210), value);
+        dl->AddText(ImVec2(vx, p.y), valCol, value);
+
+        ImGui::Dummy(ImVec2(g_box.innerW, ImGui::GetTextLineHeight() + 2.0f));
+    }
 }
 
-// имя клавиши по vk
 static std::string KeyName(int vk)
 {
+    if (vk <= 0) return "-";
     switch (vk)
     {
-    case VK_LBUTTON:  return "ЛКМ";
-    case VK_RBUTTON:  return "ПКМ";
-    case VK_MBUTTON:  return "СКМ";
+    case VK_LBUTTON:  return "LMB";
+    case VK_RBUTTON:  return "RMB";
+    case VK_MBUTTON:  return "MMB";
     case VK_XBUTTON1: return "X1";
     case VK_XBUTTON2: return "X2";
     case VK_MENU:     return "ALT";
@@ -271,7 +449,6 @@ static std::string KeyName(int vk)
     return b;
 }
 
-// можно ли вешать на клавишу
 static bool IsBindable(int vk)
 {
     switch (vk)
@@ -286,14 +463,6 @@ static bool IsBindable(int vk)
     }
 }
 
-// название слева, значение справа
-static void InfoRow(const char* label, const char* value, ImVec4 color)
-{
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetWindowWidth() - 140.0f);
-    ImGui::TextColored(color, value);
-}
-
 Menu::~Menu()
 {
     Destroy();
@@ -304,16 +473,22 @@ LRESULT CALLBACK Menu::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
         return 0;
 
+    Menu* self = reinterpret_cast<Menu*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
     switch (msg)
     {
+    case WM_MOUSEACTIVATE:
+        if (!self || !self->m_grabFocus)
+            return MA_NOACTIVATE;
+        return MA_ACTIVATE;
+
     case WM_NCHITTEST:
     {
-        // верх — таскаем окно, кроме правого угла с крестиком
         POINT p{ static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp)) };
         RECT r;
         GetWindowRect(hwnd, &r);
-        constexpr int kTitleH  = 40;
-        constexpr int kBtnZone = 110;
+        constexpr int kTitleH  = 28;
+        constexpr int kBtnZone = 44;
         if (p.y >= r.top && p.y <= r.top + kTitleH &&
             p.x >= r.left && p.x <= r.right - kBtnZone)
             return HTCAPTION;
@@ -333,19 +508,22 @@ bool Menu::Create(HINSTANCE hInst, int screenW, int screenH)
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = kMenuClass;
-    RegisterClassExW(&wc);   // повторно — пофиг на ошибку
+    RegisterClassExW(&wc);
 
     int x = (screenW - m_w) / 2;
-    int y = (screenH - m_h) / 2 - 60;
+    int y = (screenH - m_h) / 2 - 20;
 
+    // WS_EX_NOACTIVATE гарантирует, что меню не крадёт фокус у игры и не сворачивает её.
     m_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kMenuClass, L"aim menu", WS_POPUP,
         x, y, m_w, m_h,
         nullptr, nullptr, hInst, nullptr);
 
     if (!m_hwnd)
         return false;
+
+    SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     if (!CreateDeviceAndSwapChain())
         return false;
@@ -359,32 +537,28 @@ bool Menu::Create(HINSTANCE hInst, int screenW, int screenH)
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename  = nullptr;
     io.LogFilename  = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    // сегов регулярный + жирный, кириллица в диапазоне
     static const ImWchar ranges[] =
     {
-        0x0020, 0x00FF,   // Basic Latin + Latin-1 (включая ×)
-        0x0400, 0x052F,   // Cyrillic + Cyrillic Supplement
-        0x2010, 0x205E,   // тире/кавычки/многоточие
-        0x25A0, 0x25FF,   // ●○ и геометрия, иначе знаки вопроса лезут
+        0x0020, 0x00FF,
+        0x0400, 0x052F,
+        0x2010, 0x205E,
+        0x25A0, 0x25FF,
         0,
     };
     io.Fonts->Clear();
     io.FontDefault = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, nullptr, ranges);
+        "C:\\Windows\\Fonts\\segoeui.ttf", 14.5f, nullptr, ranges);
+    g_smallBold = io.Fonts->AddFontFromFileTTF(
+        "C:\\Windows\\Fonts\\segoeuib.ttf", 14.5f, nullptr, ranges);
     g_boldFont = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\segoeuib.ttf", 22.0f, nullptr, ranges);
+        "C:\\Windows\\Fonts\\segoeuib.ttf", 18.0f, nullptr, ranges);
 
-    // ищем шрифт иконок рядом с exe, иначе в fonts/
     std::string faPath = ExeDir() + "fa-solid-900.ttf";
     g_iconFont = io.Fonts->AddFontFromFileTTF(faPath.c_str(), 26.0f, nullptr, kIconRanges);
     if (!g_iconFont)
         g_iconFont = io.Fonts->AddFontFromFileTTF(
-            (ExeDir() + "fonts\\fa-solid-900.ttf").c_str(), 26.0f, nullptr, kIconRanges);
-    if (!g_iconFont)
-        g_iconFont = io.Fonts->AddFontFromFileTTF(
-            "fonts\\fa-solid-900.ttf", 26.0f, nullptr, kIconRanges);
+            "C:\\Users\\f6ll9n\\Desktop\\aim\\fonts\\fa-solid-900.ttf", 26.0f, nullptr, kIconRanges);
 
     SetStyle();
     return true;
@@ -393,84 +567,56 @@ bool Menu::Create(HINSTANCE hInst, int screenW, int screenH)
 void Menu::SetStyle()
 {
     ImGuiStyle& st = ImGui::GetStyle();
-    // плоский минимализм: почти нет скруглений, никаких теней. как на рефе.
-    st.WindowRounding    = 3.0f;
-    st.ChildRounding     = 3.0f;
-    st.FrameRounding     = 2.0f;
-    st.PopupRounding     = 3.0f;
-    st.GrabRounding      = 2.0f;
-    st.TabRounding       = 3.0f;
-    st.ScrollbarRounding = 2.0f;
+    st.WindowRounding    = 0.0f;
+    st.ChildRounding     = 0.0f;
+    st.FrameRounding     = 0.0f;
+    st.PopupRounding     = 0.0f;
+    st.GrabRounding      = 0.0f;
+    st.TabRounding       = 0.0f;
+    st.ScrollbarRounding = 0.0f;
     st.WindowBorderSize  = 0.0f;
     st.FrameBorderSize   = 1.0f;
-    st.TabBorderSize     = 1.0f;
-    st.WindowPadding     = ImVec2(18, 14);
-    st.FramePadding      = ImVec2(12, 6);
-    st.ItemSpacing       = ImVec2(10, 9);
+    st.WindowPadding     = ImVec2(0, 0);
+    st.FramePadding      = ImVec2(6, 4);
+    st.ItemSpacing       = ImVec2(8, 5);
     st.ItemInnerSpacing  = ImVec2(6, 4);
-    st.ScrollbarSize     = 8.0f;
-    st.GrabMinSize       = 12.0f;
+    st.ScrollbarSize     = 5.0f;
 
     ImVec4* c = st.Colors;
-    ImVec4 accent = Accent();
-    ImVec4 accentBright = AccentBright();
-    c[ImGuiCol_Text]                 = ImVec4(0.78f, 0.78f, 0.80f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
     c[ImGuiCol_TextDisabled]         = ImVec4(0.42f, 0.43f, 0.46f, 1.00f);
-    c[ImGuiCol_WindowBg]             = ImVec4(0.05f, 0.05f, 0.06f, 0.98f);
-    c[ImGuiCol_ChildBg]              = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
-    c[ImGuiCol_PopupBg]              = ImVec4(0.08f, 0.08f, 0.09f, 0.98f);
-    c[ImGuiCol_Border]               = ImVec4(0.16f, 0.16f, 0.17f, 1.00f);
-    c[ImGuiCol_FrameBg]              = ImVec4(0.13f, 0.13f, 0.14f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.20f, 0.20f, 0.21f, 1.00f);
-    c[ImGuiCol_FrameBgActive]        = ImVec4(0.24f, 0.24f, 0.26f, 1.00f);
-    c[ImGuiCol_TitleBg]              = ImVec4(0.07f, 0.07f, 0.08f, 1.00f);
-    c[ImGuiCol_TitleBgActive]        = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.07f, 0.07f, 0.08f, 1.00f);
-    c[ImGuiCol_MenuBarBg]            = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
-    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.02f, 0.02f, 0.60f);
-    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.25f, 0.25f, 0.27f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.32f, 0.32f, 0.34f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.38f, 0.38f, 0.40f, 1.00f);
-    c[ImGuiCol_CheckMark]            = ImVec4(0.07f, 0.08f, 0.09f, 1.00f);  // галочку рисуем руками
-    c[ImGuiCol_SliderGrab]           = accent;
-    c[ImGuiCol_SliderGrabActive]     = accentBright;
-    c[ImGuiCol_Button]               = ImVec4(0.14f, 0.14f, 0.15f, 1.00f);
-    c[ImGuiCol_ButtonHovered]        = ImVec4(0.20f, 0.20f, 0.21f, 1.00f);
-    c[ImGuiCol_ButtonActive]         = ImVec4(0.24f, 0.24f, 0.26f, 1.00f);
-    c[ImGuiCol_Header]               = ImVec4(0.15f, 0.15f, 0.16f, 1.00f);
-    c[ImGuiCol_HeaderHovered]        = ImVec4(0.20f, 0.20f, 0.21f, 1.00f);
-    c[ImGuiCol_HeaderActive]         = ImVec4(0.24f, 0.24f, 0.26f, 1.00f);
-    c[ImGuiCol_Separator]            = ImVec4(0.16f, 0.16f, 0.17f, 1.00f);
-    c[ImGuiCol_SeparatorHovered]     = accent;
-    c[ImGuiCol_SeparatorActive]      = accentBright;
-    c[ImGuiCol_ResizeGrip]           = ImVec4(0.25f, 0.25f, 0.27f, 1.00f);
-    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.32f, 0.32f, 0.34f, 1.00f);
-    c[ImGuiCol_ResizeGripActive]     = accent;
-    c[ImGuiCol_Tab]                  = ImVec4(0.13f, 0.13f, 0.14f, 1.00f);
-    c[ImGuiCol_TabHovered]           = ImVec4(0.20f, 0.20f, 0.21f, 1.00f);
-    c[ImGuiCol_TabSelected]          = accent;
-    c[ImGuiCol_TabDimmed]            = ImVec4(0.13f, 0.13f, 0.14f, 1.00f);
-    c[ImGuiCol_PlotLines]            = accent;
-    c[ImGuiCol_PlotHistogram]        = accent;
-    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.66f, 0.88f, 0.29f, 0.30f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.067f, 0.067f, 0.067f, 1.00f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.067f, 0.067f, 0.067f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.11f, 0.11f, 0.11f, 1.00f);
+    c[ImGuiCol_Border]               = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.05f, 0.05f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.32f, 0.32f, 0.32f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
 }
 
 bool Menu::CreateDeviceAndSwapChain()
 {
     DXGI_SWAP_CHAIN_DESC sd{};
-    sd.BufferCount = 2;
-    sd.BufferDesc.Width  = 0;
-    sd.BufferDesc.Height = 0;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferDesc.RefreshRate.Numerator   = 60;
+    sd.BufferCount                        = 2;
+    sd.BufferDesc.Width                   = 0;
+    sd.BufferDesc.Height                  = 0;
+    sd.BufferDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator   = 0;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags        = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    sd.BufferUsage  = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = m_hwnd;
-    sd.SampleDesc.Count   = 1;
-    sd.SampleDesc.Quality = 0;
-    sd.Windowed  = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    sd.Flags                              = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage                        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow                       = m_hwnd;
+    sd.SampleDesc.Count                   = 1;
+    sd.SampleDesc.Quality                 = 0;
+    sd.Windowed                           = TRUE;
+    sd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
 
     const D3D_FEATURE_LEVEL levels[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
     D3D_FEATURE_LEVEL got{};
@@ -492,13 +638,12 @@ bool Menu::CreateDeviceAndSwapChain()
 
 void Menu::Destroy()
 {
-    if (m_rtv)    { m_rtv->Release();       m_rtv = nullptr; }
-    if (m_ctx)    { m_ctx->ClearState();    m_ctx->Release(); m_ctx = nullptr; }
-    if (m_swap)   { m_swap->Release();      m_swap = nullptr; }
-    if (m_device) { m_device->Release();     m_device = nullptr; }
-    if (m_hwnd)   { DestroyWindow(m_hwnd);   m_hwnd = nullptr; }
+    if (m_rtv)    { m_rtv->Release();    m_rtv = nullptr; }
+    if (m_ctx)    { m_ctx->ClearState(); m_ctx->Release(); m_ctx = nullptr; }
+    if (m_swap)   { m_swap->Release();   m_swap = nullptr; }
+    if (m_device) { m_device->Release(); m_device = nullptr; }
+    if (m_hwnd)   { DestroyWindow(m_hwnd); m_hwnd = nullptr; }
 
-    // имгуи тушим после дх11, и только если контекст был
     if (ImGui::GetCurrentContext() != nullptr)
     {
         ImGui_ImplDX11_Shutdown();
@@ -507,27 +652,38 @@ void Menu::Destroy()
     }
 }
 
-void Menu::SetVisible(bool v)
+void Menu::SetVisible(bool v, bool grabFocus)
 {
-    m_visible = v;
+    m_visible   = v;
+    m_grabFocus = grabFocus;
+
+    if (!v)
+    {
+        m_listening    = false;
+        m_listenTarget = nullptr;
+        m_listenActive = false;
+    }
     if (!m_hwnd)
         return;
 
     if (v)
     {
-        SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-        ShowWindow(m_hwnd, SW_SHOW);
+        // Снимаем ограничение курсора, чтобы можно было кликать по меню, не сворачивая игру.
+        ClipCursor(nullptr);
 
-        // юнити держит мышь залоченной по центру. активируем окно — мышь отдаёт,
-        // как при альт-табе, но игру не сворачивает
-        INPUT in[1]{};
-        in[0].type = INPUT_KEYBOARD;
-        in[0].ki.wVk = VK_MENU;
-        in[0].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, in, sizeof(INPUT));   // сброс лимита, чтоб SetForegroundWindow сработало
-        SetForegroundWindow(m_hwnd);
-        SetFocus(m_hwnd);
+        if (grabFocus)
+        {
+            SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            ShowWindow(m_hwnd, SW_SHOW);
+            SetForegroundWindow(m_hwnd);
+        }
+        else
+        {
+            SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+        }
     }
     else
     {
@@ -535,34 +691,69 @@ void Menu::SetVisible(bool v)
     }
 }
 
-void Menu::TextKeyBind(const char* label, int* key)
+void Menu::KeyBindTag(int* key, bool allowClear)
 {
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetWindowWidth() - 110.0f);
-
-    char btn[64];
+    char tag[32];
     if (m_listening && m_listenTarget == key)
-        std::snprintf(btn, sizeof(btn), "...##kb%p", static_cast<void*>(key));
+        std::snprintf(tag, sizeof(tag), "[...]");
     else
-        std::snprintf(btn, sizeof(btn), "%s##kb%p", KeyName(*key).c_str(),
-                      static_cast<void*>(key));
+        std::snprintf(tag, sizeof(tag), "[%s]", KeyName(*key).c_str());
 
-    if (ImGui::Button(btn, ImVec2(100, 0)))
+    ImVec2 ts = ImGui::CalcTextSize(tag);
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    // Ставим в ту же строку справа по ширине бокса
+    ImVec2 itemMin = ImGui::GetItemRectMin();
+    ImVec2 itemMax = ImGui::GetItemRectMax();
+    float tagX = g_box.p0.x + 14.0f + g_box.innerW - ts.x;
+    float tagY = itemMin.y;
+
+    ImGui::SetCursorScreenPos(ImVec2(tagX, tagY));
+    char idBuf[32];
+    std::snprintf(idBuf, sizeof(idBuf), "##kb%p", static_cast<void*>(key));
+    ImGui::InvisibleButton(idBuf, ImVec2(ts.x + 4.0f, itemMax.y - itemMin.y));
+    bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
     {
         m_listening    = true;
         m_listenTarget = key;
-        m_listenActive = false;   // снимок клавы снимем след. кадром
+        m_listenActive = false;
     }
+    if (allowClear && ImGui::IsItemClicked(ImGuiMouseButton_Right))
+    {
+        *key = 0;
+        if (m_listenTarget == key)
+        {
+            m_listening    = false;
+            m_listenTarget = nullptr;
+            m_listenActive = false;
+        }
+    }
+    if (hovered)
+        ImGui::SetTooltip(allowClear ? "ЛКМ — бинд, ПКМ — убрать" : "ЛКМ — переназначить");
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 col = (m_listening && m_listenTarget == key) ? IM_COL32(154, 222, 42, 255)
+              : hovered                                ? IM_COL32(220, 220, 220, 255)
+                                                       : IM_COL32(125, 125, 125, 255);
+    dl->AddText(ImVec2(tagX + 1.0f, tagY + 1.0f), IM_COL32(0, 0, 0, 200), tag);
+    dl->AddText(ImVec2(tagX, tagY), col, tag);
+
+    ImGui::SetCursorScreenPos(cur);
 }
 
-void Menu::Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& info)
+Menu::Action Menu::Render(AimSettings& s,
+                          std::atomic<float>& conf,
+                          std::atomic<float>& iou,
+                          const RuntimeInfo& info)
 {
+    Action action = Action::None;
     if (!m_visible || !m_device || !m_swap || !m_rtv)
-        return;
+        return action;
+
+    m_grabFocus = s.grabFocus;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
-
     ImGui::NewFrame();
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -573,229 +764,345 @@ void Menu::Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& i
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-    ImGui::Begin("##aimmenu", nullptr, kFlags);
+    ImGui::Begin("##skeetmenu", nullptr, kFlags);
 
-    // радужная полоска сверху — фишка рефа. во всю ширину окна.
+    ImDrawList* winDl = ImGui::GetWindowDrawList();
+    const float W = static_cast<float>(m_w);
+    const float H = static_cast<float>(m_h);
+
+    // 1) Двойная тёмная рамка окна (1px чёрная + 1px тёмно-серая + тонкая подсветка)
+    winDl->AddRect(ImVec2(0, 0), ImVec2(W, H), IM_COL32(8, 8, 8, 255));
+    winDl->AddRect(ImVec2(1, 1), ImVec2(W - 1, H - 1), IM_COL32(46, 46, 46, 255));
+    winDl->AddRect(ImVec2(2, 2), ImVec2(W - 2, H - 2), IM_COL32(12, 12, 12, 255));
+
+    // 2) Фирменная радужная полоса сверху (плавный градиент во всю ширину)
     {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 a0 = ImGui::GetWindowPos();
-        float w = ImGui::GetWindowWidth();
-        const ImU32 cols[5] = {
-            IM_COL32(86, 165, 255, 255),   // синий
-            IM_COL32(150, 95, 240, 255),   // фиолет
-            IM_COL32(240, 95, 180, 255),   // розовый
-            IM_COL32(255, 150, 60, 255),   // оранж
-            IM_COL32(200, 220, 65, 255),   // лайм
-        };
-        float seg = w / 5.0f;
-        for (int i = 0; i < 5; ++i)
-            dl->AddRectFilled(ImVec2(a0.x + seg * i, a0.y),
-                              ImVec2(a0.x + seg * (i + 1), a0.y + 3.0f), cols[i]);
+        const float y0 = 3.0f, y1 = 5.0f;
+        const float x0 = 3.0f, x1 = W - 3.0f;
+        const float seg = (x1 - x0) / 3.0f;
+        const ImU32 c0 = IM_COL32(55,  177, 218, 255);
+        const ImU32 c1 = IM_COL32(158,  86, 224, 255);
+        const ImU32 c2 = IM_COL32(217,  68, 138, 255);
+        const ImU32 c3 = IM_COL32(204, 227,  53, 255);
+        winDl->AddRectFilledMultiColor(ImVec2(x0,           y0), ImVec2(x0 + seg,     y1), c0, c1, c1, c0);
+        winDl->AddRectFilledMultiColor(ImVec2(x0 + seg,     y0), ImVec2(x0 + seg * 2, y1), c1, c2, c2, c1);
+        winDl->AddRectFilledMultiColor(ImVec2(x0 + seg * 2, y0), ImVec2(x1,           y1), c2, c3, c3, c2);
+        winDl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), IM_COL32(8, 8, 8, 255));
     }
 
-    // шапка
-    {
-        ImGui::SetCursorPos(ImVec2(22, 18));
-        if (g_iconFont)
-        {
-            ImGui::PushFont(g_iconFont);
-            ImGui::TextColored(AccentBright(), ICON_AIM);
-            ImGui::PopFont();
-            ImGui::SameLine(0.0f, 10.0f);
-        }
-
-        if (g_boldFont) ImGui::PushFont(g_boldFont);
-        ImGui::TextColored(ImVec4(0.94f, 0.96f, 0.98f, 1.0f), "f6");
-        if (g_boldFont) ImGui::PopFont();
-
-        ImGui::SameLine(0.0f, 8.0f);
-        ImGui::TextColored(ImVec4(0.38f, 0.41f, 0.48f, 1.0f), "aim");
-
-        // статус-пилл: зелёная точка = айм активен
-        float pillW = 60.0f, pillH = 22.0f;
-        ImVec2 pp(m_w - pillW - 52, 18);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(pp, ImVec2(pp.x + pillW, pp.y + pillH),
-                          info.aimHeld ? ImGui::GetColorU32(Accent(0.18f))
-                                       : IM_COL32(255, 255, 255, 12),
-                          6.0f);
-        dl->AddCircleFilled(ImVec2(pp.x + 13, pp.y + pillH * 0.5f), 3.0f,
-                            info.aimHeld ? ImGui::GetColorU32(AccentBright())
-                                         : IM_COL32(130, 133, 140, 255));
-        dl->AddText(ImVec2(pp.x + 21, pp.y + 3.5f),
-                    info.aimHeld ? ImGui::GetColorU32(AccentBright())
-                                 : IM_COL32(150, 153, 160, 255),
-                    "АИМ");
-
-        // крестик, ровно по центру, при наведении красный
-        float bsz = 26.0f;
-        ImVec2 cp(m_w - bsz - 16, 16);
-        ImGui::SetCursorPos(ImVec2(cp.x, cp.y));
-        ImGui::InvisibleButton("##close", ImVec2(bsz, bsz));
-        bool closeHover = ImGui::IsItemHovered();
-        if (closeHover)
-            dl->AddRectFilled(cp, ImVec2(cp.x + bsz, cp.y + bsz),
-                              ImGui::GetColorU32(ImVec4(0.85f, 0.25f, 0.25f, 1.0f)), 6.0f);
-        ImVec2 xs = ImGui::CalcTextSize("×");
-        dl->AddText(ImVec2(cp.x + (bsz - xs.x) * 0.5f, cp.y + (bsz - xs.y) * 0.5f),
-                    ImGui::GetColorU32(closeHover ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
-                                                  : ImVec4(0.60f, 0.63f, 0.70f, 1.0f)),
-                    "×");
-        if (ImGui::IsItemClicked())
-            SetVisible(false);
-    }
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // слева сайдбар, справа контент
-    static int section = 0;             // живёт между кадрами. НЕ ТРОГАЙ
-    static int   prevSection = 0;       // для фейда на переключение
-    static float contentAlpha = 1.0f;
+    // 3) Сайдбар слева (как на рефе: узкая вертикальная колонка с крупными иконками)
+    static int section    = 0;
+    static int presetIdx  = 0;
+    static float flashT   = 0.0f;
+    static const char* flashMsg = "";
 
     {
         float dt = ImGui::GetIO().DeltaTime;
-        if (section != prevSection) { contentAlpha = 0.0f; prevSection = section; }
-        float kf = dt * 10.0f; if (kf > 1.0f) kf = 1.0f;
-        contentAlpha += (1.0f - contentAlpha) * kf;
+        if (flashT > 0.0f) flashT = (flashT > dt) ? (flashT - dt) : 0.0f;
     }
 
-    const char* kTabs[4]  = { "AIM", "ВИЗУАЛ", "КЛАВИШИ", "ИНФО" };
-    const char* kIcons[4] = { ICON_AIM, ICON_VISUAL, ICON_KEYS, ICON_INFO };
+    constexpr float kSideW = 74.0f;
+    const float contentTop = 6.0f;
+    const float bodyH      = H - contentTop - 3.0f;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 8));
-    ImGui::BeginChild("##side", ImVec2(90, 0), false,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    const ImVec2 kBtn(74, 38);
+    // Фон сайдбара
+    winDl->AddRectFilled(ImVec2(3.0f, contentTop), ImVec2(3.0f + kSideW, H - 3.0f),
+                         IM_COL32(12, 12, 12, 255));
+    // Вертикальный разделитель
+    winDl->AddLine(ImVec2(3.0f + kSideW, contentTop), ImVec2(3.0f + kSideW, H - 3.0f),
+                   IM_COL32(38, 38, 38, 255));
+
+    const char* kTabs[4]  = { "Аимбот", "Визуал", "Настройки", "Инфо" };
+    const char* kIcons[4] = { ICON_AIM, ICON_VISUAL, ICON_GEARS, ICON_USER };
+
+    const float tabStartY = contentTop + 26.0f;
+    const float tabH      = 72.0f;
+
     for (int i = 0; i < 4; ++i)
     {
-        ImGui::SetCursorPosX((90.0f - kBtn.x) * 0.5f);
-
-        bool sel = (i == section);
-        const char* label = g_iconFont ? kIcons[i] : kTabs[i];
-        if (g_iconFont)
-            ImGui::PushFont(g_iconFont);
-        ImGui::PushID(i);
-        if (NavButton("##nav", label, kBtn, sel))
+        float ty0 = tabStartY + i * tabH;
+        float ty1 = ty0 + tabH;
+        ImGui::SetCursorScreenPos(ImVec2(3.0f, ty0));
+        char tid[16];
+        std::snprintf(tid, sizeof(tid), "##tab%d", i);
+        if (ImGui::InvisibleButton(tid, ImVec2(kSideW, tabH)))
             section = i;
-        ImGui::PopID();
-        if (g_iconFont)
-            ImGui::PopFont();
+        bool hovered = ImGui::IsItemHovered();
+        bool active  = (section == i);
 
-        if (ImGui::IsItemHovered())
+        if (active)
+        {
+            // Вырез в рамке как в Skeet: фон совпадает с основной областью
+            winDl->AddRectFilled(ImVec2(3.0f, ty0), ImVec2(3.0f + kSideW + 1.0f, ty1),
+                                 IM_COL32(17, 17, 17, 255));
+            winDl->AddLine(ImVec2(3.0f, ty0), ImVec2(3.0f + kSideW, ty0), IM_COL32(38, 38, 38, 255));
+            winDl->AddLine(ImVec2(3.0f, ty1), ImVec2(3.0f + kSideW, ty1), IM_COL32(38, 38, 38, 255));
+            winDl->AddLine(ImVec2(3.0f, ty0 + 1.0f), ImVec2(3.0f + kSideW, ty0 + 1.0f), IM_COL32(8, 8, 8, 255));
+            winDl->AddLine(ImVec2(3.0f, ty1 - 1.0f), ImVec2(3.0f + kSideW, ty1 - 1.0f), IM_COL32(8, 8, 8, 255));
+        }
+
+        const char* lbl = g_iconFont ? kIcons[i] : kTabs[i];
+        if (g_iconFont) ImGui::PushFont(g_iconFont);
+        ImVec2 is = ImGui::CalcTextSize(lbl);
+        ImU32 col = active  ? IM_COL32(236, 236, 236, 255)
+                  : hovered ? IM_COL32(150, 150, 150, 255)
+                            : IM_COL32(88,  88,  88,  255);
+        float ix = 3.0f + (kSideW - is.x) * 0.5f;
+        float iy = ty0  + (tabH  - is.y) * 0.5f;
+        winDl->AddText(ImVec2(ix + 1.0f, iy + 1.0f), IM_COL32(0, 0, 0, 220), lbl);
+        winDl->AddText(ImVec2(ix, iy), col, lbl);
+        if (g_iconFont) ImGui::PopFont();
+
+        if (hovered)
             ImGui::SetTooltip("%s", kTabs[i]);
-        ImGui::Dummy(ImVec2(0, 4));
     }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
 
-    ImGui::SameLine();
-
-    // полоса между сайдбаром и контентом
+    // Маленькая кнопка закрытия '×' в правом верхнем углу (и по N / Insert)
     {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 v = ImGui::GetCursorScreenPos();
-        dl->AddLine(ImVec2(v.x - 4, v.y), ImVec2(v.x - 4, v.y + m_h - 84),
-                    IM_COL32(34, 37, 46, 255), 1.0f);
+        float bsz = 20.0f;
+        ImVec2 cp(W - bsz - 8.0f, 9.0f);
+        ImGui::SetCursorScreenPos(cp);
+        ImGui::InvisibleButton("##close", ImVec2(bsz, bsz));
+        bool ch = ImGui::IsItemHovered();
+        ImVec2 xs = ImGui::CalcTextSize("×");
+        winDl->AddText(ImVec2(cp.x + (bsz - xs.x) * 0.5f, cp.y + (bsz - xs.y) * 0.5f),
+                       ch ? IM_COL32(240, 90, 90, 255) : IM_COL32(115, 115, 115, 255), "×");
+        if (ImGui::IsItemClicked())
+            SetVisible(false, m_grabFocus);
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, contentAlpha);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 16));
-    ImGui::BeginChild("##content", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
-    ImGui::Dummy(ImVec2(0, 10));
+    // 4) Контентная область (2 колонки групбоксов, как в референсе)
+    const float contentX = 3.0f + kSideW + 18.0f;
+    const float contentW = W - contentX - 18.0f;
+    const float colGap   = 16.0f;
+    const float colW     = (contentW - colGap) * 0.5f;
+
+    ImGui::SetCursorScreenPos(ImVec2(contentX, contentTop + 18.0f));
+    ImGui::BeginChild("##content", ImVec2(contentW + 8.0f, bodyH - 22.0f), false);
+
+    const ImVec2 base = ImGui::GetCursorScreenPos();
+    const float  leftX  = base.x;
+    const float  rightX = base.x + colW + colGap;
+
     switch (section)
     {
-    case 0:   // AIM
+    case 0:   // АИМБОТ
     {
-        BeginPanel("Наведение");
-        LabeledSliderF("Высота (голова)", "headFrac", &s.headFrac,
-                       AimSettings::HD_MIN, AimSettings::HD_MAX, "%.2f");
-        ImGui::Spacing();
-        // проверка что это реально голова, а не мусор. работает.
-        // ниже порога целимся в тело, а не дёргаемся в фантом
-        LabeledSliderF("Точность головы (в разработке)", "headConf", &s.headConf,
-                       AimSettings::HC_MIN, AimSettings::HC_MAX, "%.2f");
-        ImGui::Spacing();
-        LabeledSliderF("Плавность", "smooth", &s.smoothness,
-                       AimSettings::SM_MIN, AimSettings::SM_MAX, "%.2f");
-        EndPanel();
+        // --- Левая колонка ---
+        ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
+        BeginGroupBox("Aimbot", colW);
+        SkeetCheck("##aim_en", "Включить аим", &s.aimEnabled);
+        KeyBindTag(&s.aimKey1, false);
+        ImGui::Dummy(ImVec2(0, 4));
+        SkeetSliderI("FOV аима", "##aimFov", &s.aimFov,
+                     AimSettings::AIMFOV_MIN, AimSettings::AIMFOV_MAX, "%d px");
+        SkeetSliderF("Сила доводки", "##strength", &s.aimStrength,
+                     AimSettings::ST_MIN, AimSettings::ST_MAX, "%.2f");
+        SkeetSliderF("Сглаживание", "##smooth", &s.smoothness,
+                     AimSettings::SM_MIN, AimSettings::SM_MAX, "%.2f");
+        SkeetSliderF("Макс. шаг мыши", "##maxStep", &s.aimMaxStep,
+                     AimSettings::MS_MIN, AimSettings::MS_MAX, "%.0f px");
+        SkeetSliderF("Мёртвая зона", "##deadzone", &s.aimDeadzone,
+                     AimSettings::DZ_MIN, AimSettings::DZ_MAX, "%.0f px");
+        EndGroupBox();
 
-        BeginPanel("Зона наводки");
-        LabeledSliderI("FOV аима", "aimFov", &s.aimFov,
-                       AimSettings::AIMFOV_MIN, AimSettings::AIMFOV_MAX, "%d px");
-        EndPanel();
-
-        BeginPanel("Детекция");
+        // --- Правая колонка ---
+        ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
+        BeginGroupBox("Target & Detection", colW);
+        SkeetSliderF("Высота точки (тело)", "##headFrac", &s.headFrac,
+                     AimSettings::HD_MIN, AimSettings::HD_MAX, "%.2f");
+        SkeetSliderF("Порог головы", "##headConf", &s.headConf,
+                     AimSettings::HC_MIN, AimSettings::HC_MAX, "%.2f");
         {
             float c = conf.load();
-            if (LabeledSliderF("Точность проверки", "conf", &c, 0.05f, 0.95f, "%.2f"))
+            if (SkeetSliderF("Порог детекции (Conf)", "##conf", &c, 0.05f, 0.95f, "%.2f"))
                 conf.store(c);
+            float u = iou.load();
+            if (SkeetSliderF("Порог NMS (IoU)", "##iou", &u, 0.10f, 0.85f, "%.2f"))
+                iou.store(u);
         }
-        EndPanel();
+        EndGroupBox();
+
+        BeginGroupBox("Keybinds", colW);
+        {
+            ImVec2 rp = ImGui::GetCursorScreenPos();
+            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "Основная клавиша");
+            KeyBindTag(&s.aimKey1, false);
+            ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + ImGui::GetTextLineHeight() + 6.0f));
+
+            rp = ImGui::GetCursorScreenPos();
+            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "Доп. клавиша");
+            KeyBindTag(&s.aimKey2, true);
+            ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + ImGui::GetTextLineHeight() + 4.0f));
+        }
+        EndGroupBox();
         break;
     }
+
     case 1:   // ВИЗУАЛ
     {
-        BeginPanel("Индикаторы");
-        CheckBox("##t_cross", "Крестик", &s.showCrosshair);
-        ImGui::Spacing();
-        CheckBox("##t_boxes", "Боксы целей", &s.showBoxes);
-        ImGui::Spacing();
-        CheckBox("##t_line", "Линия до цели", &s.showLine);
-        ImGui::Spacing();
-        CheckBox("##t_log", "Лог-панель", &s.showLog);
-        EndPanel();
+        ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
+        BeginGroupBox("ESP & Overlay", colW);
+        SkeetCheck("##v_boxes", "Боксы целей", &s.showBoxes);
+        SkeetCheck("##v_line",  "Линия до цели", &s.showLine);
+        SkeetCheck("##v_cross", "Крестик по центру", &s.showCrosshair);
+        SkeetCheck("##v_fov",   "Квадрат зоны наводки", &s.showFov);
+        SkeetCheck("##v_log",   "Панель телеметрии", &s.showLog);
+        EndGroupBox();
 
-        BeginPanel("Оверлей");
-        CheckBox("##t_fov", "Зона наводки (FOV)", &s.showFov);
-        EndPanel();
+        ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
+        BeginGroupBox("Performance", colW);
+        SkeetSliderI("Лимит UI FPS", "##uiMaxFps", &s.uiMaxFps,
+                     AimSettings::UIFPS_MIN, AimSettings::UIFPS_MAX, "%d fps", "Без лимита");
+        ImGui::Dummy(ImVec2(0, 2));
+        SkeetCheck("##v_grab", "Перехват фокуса (для курсора)", &s.grabFocus);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Выкл (по умолч.): меню открывается поверх игры без сворачивания.\nВкл: отдаёт фокус окну меню (если игра жёстко держит мышь).");
+        EndGroupBox();
         break;
     }
-    case 2:   // КЛАВИШИ
+
+    case 2:   // НАСТРОЙКИ И ПРЕСЕТЫ (как на референсе)
     {
-        BeginPanel("Аим");
-        TextKeyBind("Клавиша аима 1", &s.aimKey1);
-        ImGui::Spacing();
-        TextKeyBind("Клавиша аима 2", &s.aimKey2);
-        EndPanel();
+        ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
+        BeginGroupBox("Miscellaneous", colW);
+        SkeetSliderI("Override FOV", "##m_fov", &s.aimFov,
+                     AimSettings::AIMFOV_MIN, AimSettings::AIMFOV_MAX, "%d px");
+        SkeetCheck("##m_aim",   "Aimbot active", &s.aimEnabled);
+        KeyBindTag(&s.aimKey1, false);
+        SkeetCheck("##m_boxes", "Show player boxes", &s.showBoxes);
+        SkeetCheck("##m_line",  "Show snapline", &s.showLine);
+        SkeetCheck("##m_fov",   "Show FOV square", &s.showFov);
+        SkeetCheck("##m_log",   "Show debug HUD", &s.showLog);
+        SkeetCheck("##m_grab",  "Grab focus on menu open", &s.grabFocus);
+        ImGui::Dummy(ImVec2(0, 4));
+        if (SkeetButton("Apply Legit Preset"))
+        {
+            s.aimStrength = 0.12f; s.smoothness = 0.22f; s.aimMaxStep = 20.0f;
+            s.aimDeadzone = 9.0f;  s.aimFov = 320; s.headFrac = 0.30f; s.headConf = 0.60f;
+            presetIdx = 0; flashMsg = "Пресет Legit применён"; flashT = 1.5f;
+        }
+        if (SkeetButton("Apply Fast Preset"))
+        {
+            s.aimStrength = 0.24f; s.smoothness = 0.10f; s.aimMaxStep = 36.0f;
+            s.aimDeadzone = 6.0f;  s.aimFov = 420; s.headFrac = 0.26f; s.headConf = 0.50f;
+            presetIdx = 1; flashMsg = "Пресет Fast применён"; flashT = 1.5f;
+        }
+        EndGroupBox();
 
-        BeginPanel("Управление");
-        ImGui::TextWrapped("Открытие/закрытие меню:   N");
-        ImGui::Spacing();
-        ImGui::TextWrapped("Выход из приложения:      F8");
-        EndPanel();
+        // Правая колонка: Settings + Presets (1-в-1 компоновка скрина)
+        ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
+        BeginGroupBox("Settings", colW);
+        {
+            char buf[48];
+            SkeetInfoRow("Статус аима", info.aimHeld ? "АКТИВЕН" : (s.aimEnabled ? "готов" : "откл"),
+                         info.aimHeld ? IM_COL32(154, 222, 42, 255) : IM_COL32(170, 170, 170, 255));
+            std::snprintf(buf, sizeof(buf), "%s", info.gpu ? "DirectML (GPU)" : "CPU");
+            SkeetInfoRow("Инференс", buf,
+                         info.gpu ? IM_COL32(154, 222, 42, 255) : IM_COL32(230, 180, 80, 255));
+            std::snprintf(buf, sizeof(buf), "%.0f / %.0f fps", info.capFps, info.detFps);
+            SkeetInfoRow("CAP / DET", buf, IM_COL32(140, 220, 140, 255));
+            std::snprintf(buf, sizeof(buf), "%.0f fps (%.1f ms)", info.uiFps, info.infMs);
+            SkeetInfoRow("UI / Время", buf, IM_COL32(140, 185, 240, 255));
+        }
+        EndGroupBox();
+
+        BeginGroupBox("Presets", colW);
+        {
+            const char* kPresets[3] = { "Legit", "Fast", "Rage" };
+            if (SkeetCombo("##preset", nullptr, &presetIdx, kPresets, 3))
+            {
+                if (presetIdx == 0)
+                {
+                    s.aimStrength = 0.12f; s.smoothness = 0.22f; s.aimMaxStep = 20.0f;
+                    s.aimDeadzone = 9.0f;  s.aimFov = 320;
+                }
+                else if (presetIdx == 1)
+                {
+                    s.aimStrength = 0.24f; s.smoothness = 0.10f; s.aimMaxStep = 36.0f;
+                    s.aimDeadzone = 6.0f;  s.aimFov = 420;
+                }
+                else
+                {
+                    s.aimStrength = 0.45f; s.smoothness = 0.00f; s.aimMaxStep = 65.0f;
+                    s.aimDeadzone = 2.0f;  s.aimFov = 640;
+                }
+                flashMsg = "Пресет применён"; flashT = 1.5f;
+            }
+            if (SkeetButton("Load"))
+            {
+                action = Action::Load;
+                flashMsg = "Загружено из f6.cfg"; flashT = 1.5f;
+            }
+            if (SkeetButton("Save"))
+            {
+                action = Action::Save;
+                flashMsg = "Сохранено в f6.cfg"; flashT = 1.5f;
+            }
+            if (SkeetButton("Reset"))
+            {
+                s = AimSettings{};
+                conf.store(0.30f);
+                iou.store(0.45f);
+                action = Action::Save;
+                flashMsg = "Сброшено по умолчанию"; flashT = 1.5f;
+            }
+            if (SkeetButton("Unload"))
+            {
+                action = Action::Unload;
+            }
+            if (flashT > 0.0f)
+            {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
+                ImGui::TextColored(ImVec4(0.60f, 0.87f, 0.16f, 1.0f), "%s", flashMsg);
+            }
+        }
+        EndGroupBox();
         break;
     }
+
     case 3:   // ИНФО
     {
-        char buf[48];
-        BeginPanel("Текущее состояние");
-        InfoRow("Статус", info.aimHeld ? "АКТИВЕН" : "выкл",
-                info.aimHeld ? ImVec4(0.2f, 1.0f, 0.5f, 1.f) : ImVec4(0.6f, 0.6f, 0.6f, 1.f));
+        char buf[64];
+        ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
+        BeginGroupBox("Telemetry", colW);
+        SkeetInfoRow("Статус", info.aimHeld ? "АКТИВЕН" : "выкл",
+                     info.aimHeld ? IM_COL32(154, 222, 42, 255) : IM_COL32(150, 150, 150, 255));
         std::snprintf(buf, sizeof(buf), "%d", info.targets);
-        InfoRow("Целей", buf, AccentBright());
-        InfoRow("Режим", info.gpu ? "DML (GPU)" : "CPU",
-                info.gpu ? AccentBright() : ImVec4(0.9f, 0.7f, 0.3f, 1.f));
-        EndPanel();
-
-        BeginPanel("Производительность");
-        std::snprintf(buf, sizeof(buf), "%.0f", info.detFps);
-        InfoRow("DET fps", buf, ImVec4(0.45f, 0.9f, 0.45f, 1.f));
-        std::snprintf(buf, sizeof(buf), "%.0f", info.uiFps);
-        InfoRow("UI fps", buf, ImVec4(0.45f, 0.65f, 0.9f, 1.f));
+        SkeetInfoRow("Целей в кадре", buf, IM_COL32(154, 222, 42, 255));
+        SkeetInfoRow("Ускорение", info.gpu ? "DirectML (GPU)" : "CPU",
+                     info.gpu ? IM_COL32(154, 222, 42, 255) : IM_COL32(230, 180, 80, 255));
+        std::snprintf(buf, sizeof(buf), "%.0f fps", info.capFps);
+        SkeetInfoRow("Захват (CAP)", buf, IM_COL32(140, 210, 240, 255));
+        std::snprintf(buf, sizeof(buf), "%.0f fps", info.detFps);
+        SkeetInfoRow("Детекция (DET)", buf, IM_COL32(140, 230, 140, 255));
+        std::snprintf(buf, sizeof(buf), "%.2f ms", info.infMs);
+        SkeetInfoRow("Время YOLO", buf, IM_COL32(230, 210, 110, 255));
+        std::snprintf(buf, sizeof(buf), "%.0f fps", info.uiFps);
+        SkeetInfoRow("Оверлей (UI)", buf, IM_COL32(140, 175, 240, 255));
         std::snprintf(buf, sizeof(buf), "%.3f", info.maxConf);
-        InfoRow("Max conf", buf, ImVec4(0.9f, 0.9f, 0.9f, 1.f));
-        EndPanel();
+        SkeetInfoRow("Max conf", buf, IM_COL32(220, 220, 220, 255));
+        EndGroupBox();
+
+        ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
+        BeginGroupBox("Controls", colW);
+        SkeetInfoRow("Открыть / скрыть", "N / INSERT", IM_COL32(215, 215, 215, 255));
+        SkeetInfoRow("Выгрузить софт",   "F8",         IM_COL32(215, 215, 215, 255));
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + g_box.innerW);
+        ImGui::TextColored(ImVec4(0.58f, 0.58f, 0.58f, 1.0f),
+            "Для отображения поверх игры без сворачивания используй в игре режим "
+            "\"Без рамок\" (Borderless / Fullscreen Window).");
+        ImGui::PopTextWrapPos();
+        EndGroupBox();
         break;
     }
     }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();   // WindowPadding
-    ImGui::PopStyleVar();   // Alpha
 
+    ImGui::EndChild();
     ImGui::End();
 
-    // ребинд: снимаю снимок зажатых, потом жду НОВОГО нажатия. иначе ловит клик,
-    // которым ты окно и открыл. магия, не трогай
+    // Ребинд клавиш: снимок зажатых, затем ловим новое нажатие.
     if (m_listening && m_listenTarget)
     {
         if (!m_listenActive)
@@ -812,7 +1119,7 @@ void Menu::Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& i
                 if (down && !m_snapshot[vk] && IsBindable(vk))
                 {
                     *m_listenTarget = vk;
-                    m_listening = false;
+                    m_listening    = false;
                     m_listenTarget = nullptr;
                     m_listenActive = false;
                     break;
@@ -822,7 +1129,7 @@ void Menu::Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& i
         }
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000)
         {
-            m_listening = false;
+            m_listening    = false;
             m_listenTarget = nullptr;
             m_listenActive = false;
         }
@@ -830,16 +1137,16 @@ void Menu::Render(AimSettings& s, std::atomic<float>& conf, const RuntimeInfo& i
 
     ImGui::Render();
 
-    // рендер в свопчейн
     D3D11_VIEWPORT vp{};
-    vp.Width  = static_cast<float>(m_w);
-    vp.Height = static_cast<float>(m_h);
+    vp.Width    = static_cast<float>(m_w);
+    vp.Height   = static_cast<float>(m_h);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     m_ctx->RSSetViewports(1, &vp);
     m_ctx->OMSetRenderTargets(1, &m_rtv, nullptr);
-    const float clear[4] = { 0.05f, 0.06f, 0.08f, 1.0f };
+    const float clear[4] = { 0.067f, 0.067f, 0.067f, 1.0f };
     m_ctx->ClearRenderTargetView(m_rtv, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    m_swap->Present(1, 0);
+    m_swap->Present(0, 0);
+    return action;
 }

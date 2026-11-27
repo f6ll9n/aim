@@ -1,13 +1,22 @@
 #include "Overlay.h"
 
-#include <algorithm>
-#include <cstdlib>
-#include <cstdint>
-#include <cstdio>
+#include <cwchar>
+
+using Microsoft::WRL::ComPtr;
 
 namespace
 {
     const wchar_t* kClassName = L"BionicAimOverlayClass";
+
+    inline D2D1_COLOR_F ToD2D(COLORREF c, uint8_t alpha)
+    {
+        return D2D1_COLOR_F{
+            static_cast<float>(GetRValue(c)) / 255.0f,
+            static_cast<float>(GetGValue(c)) / 255.0f,
+            static_cast<float>(GetBValue(c)) / 255.0f,
+            static_cast<float>(alpha)        / 255.0f
+        };
+    }
 }
 
 Overlay::~Overlay()
@@ -17,6 +26,8 @@ Overlay::~Overlay()
 
 LRESULT CALLBACK Overlay::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_NCHITTEST)
+        return HTTRANSPARENT;
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -30,14 +41,14 @@ bool Overlay::Create(HINSTANCE hInst, const RECT& screenRect, const wchar_t* tit
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = kClassName;
-    RegisterClassExW(&wc);   // повторная регистрация вернёт ошибку — игнорируем
+    RegisterClassExW(&wc);
 
     m_width  = screenRect.right  - screenRect.left;
     m_height = screenRect.bottom - screenRect.top;
 
     m_hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TOPMOST |
+        WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         kClassName, title, WS_POPUP,
         screenRect.left, screenRect.top, m_width, m_height,
         nullptr, nullptr, hInst, nullptr);
@@ -45,139 +56,230 @@ bool Overlay::Create(HINSTANCE hInst, const RECT& screenRect, const wchar_t* tit
     if (!m_hwnd)
         return false;
 
-    // 32-битный DIB (top-down) + совместимый DC для отрисовки.
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = m_width;
-    bmi.bmiHeader.biHeight      = -m_height;
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    m_memDC = CreateCompatibleDC(nullptr);
-    m_dib   = CreateDIBSection(m_memDC, &bmi, DIB_RGB_COLORS, &m_bits, nullptr, 0);
-    if (!m_dib)
+    if (!InitDirect2D())
+    {
+        Destroy();
         return false;
-    m_oldGdi = SelectObject(m_memDC, m_dib);
-
-    m_font = CreateFontW(-20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    }
 
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     return true;
 }
 
+bool Overlay::InitDirect2D()
+{
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                                 levels, _countof(levels), D3D11_SDK_VERSION,
+                                 &m_d3dDevice, nullptr, &m_d3dCtx)))
+    {
+        return false;
+    }
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(m_d3dDevice.As(&dxgiDevice)))
+        return false;
+
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                                 __uuidof(ID2D1Factory1), nullptr,
+                                 reinterpret_cast<void**>(m_d2dFactory.GetAddressOf()))))
+        return false;
+
+    if (FAILED(m_d2dFactory->CreateDevice(dxgiDevice.Get(), &m_d2dDevice)))
+        return false;
+
+    if (FAILED(m_d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &m_d2dCtx)))
+        return false;
+
+    // 1 единица D2D = 1 физический пиксель независимо от масштаба Windows.
+    m_d2dCtx->SetDpi(96.0f, 96.0f);
+    m_d2dCtx->SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+    m_d2dCtx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIFactory2> dxgiFactory;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter)))
+        return false;
+    if (FAILED(adapter->GetParent(__uuidof(IDXGIFactory2),
+                                  reinterpret_cast<void**>(dxgiFactory.GetAddressOf()))))
+        return false;
+
+    DXGI_SWAP_CHAIN_DESC1 sd{};
+    sd.Width            = static_cast<UINT>(m_width);
+    sd.Height           = static_cast<UINT>(m_height);
+    sd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.Stereo           = FALSE;
+    sd.SampleDesc.Count = 1;
+    sd.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount      = 2;
+    sd.Scaling          = DXGI_SCALING_STRETCH;
+    sd.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    sd.AlphaMode        = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+    if (FAILED(dxgiFactory->CreateSwapChainForComposition(
+            m_d3dDevice.Get(), &sd, nullptr, &m_swapChain)))
+        return false;
+
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(m_swapChain->GetBuffer(0, __uuidof(IDXGISurface),
+                                      reinterpret_cast<void**>(surface.GetAddressOf()))))
+        return false;
+
+    D2D1_BITMAP_PROPERTIES1 bp{};
+    bp.pixelFormat.format    = DXGI_FORMAT_B8G8R8A8_UNORM;
+    bp.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    bp.dpiX                  = 96.0f;
+    bp.dpiY                  = 96.0f;
+    bp.bitmapOptions         = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+
+    if (FAILED(m_d2dCtx->CreateBitmapFromDxgiSurface(surface.Get(), &bp, &m_targetBitmap)))
+        return false;
+
+    m_d2dCtx->SetTarget(m_targetBitmap.Get());
+
+    if (FAILED(m_d2dCtx->CreateSolidColorBrush(D2D1_COLOR_F{ 1.f, 1.f, 1.f, 1.f }, &m_brush)))
+        return false;
+
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf()))))
+        return false;
+
+    if (FAILED(DCompositionCreateDevice(dxgiDevice.Get(), __uuidof(IDCompositionDevice),
+                                        reinterpret_cast<void**>(m_dcompDevice.GetAddressOf()))))
+        return false;
+
+    if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, &m_dcompTarget)))
+        return false;
+
+    if (FAILED(m_dcompDevice->CreateVisual(&m_dcompVisual)))
+        return false;
+
+    if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())))
+        return false;
+
+    if (FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
+        return false;
+
+    if (FAILED(m_dcompDevice->Commit()))
+        return false;
+
+    return true;
+}
+
 void Overlay::Destroy()
 {
-    if (m_oldGdi)  { SelectObject(m_memDC, m_oldGdi); m_oldGdi = nullptr; }
-    if (m_font)    { DeleteObject(m_font);            m_font = nullptr; }
-    if (m_txtFont) { DeleteObject(m_txtFont);         m_txtFont = nullptr; }
-    if (m_dib)     { DeleteObject(m_dib);             m_dib = nullptr; }
-    if (m_memDC)   { DeleteDC(m_memDC);               m_memDC = nullptr; }
-    if (m_hwnd)    { DestroyWindow(m_hwnd);           m_hwnd = nullptr; }
+    m_textFormat.Reset();
+    m_brush.Reset();
+    m_targetBitmap.Reset();
+    if (m_d2dCtx) m_d2dCtx->SetTarget(nullptr);
+    m_d2dCtx.Reset();
+    m_d2dDevice.Reset();
+    m_d2dFactory.Reset();
+    m_dwrite.Reset();
+    m_dcompVisual.Reset();
+    m_dcompTarget.Reset();
+    m_dcompDevice.Reset();
+    m_swapChain.Reset();
+    m_d3dCtx.Reset();
+    m_d3dDevice.Reset();
+
+    if (m_hwnd)
+    {
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
+    }
 }
 
 void Overlay::BeginDraw()
 {
-    // Заливаем кадр ключевым цветом (прозрачность через color-key).
-    // Используем стоковую DC-кисть (SetDCBrushColor) — без Create/Delete.
-    RECT r{ 0, 0, m_width, m_height };
-    SetDCBrushColor(m_memDC, m_key);
-    FillRect(m_memDC, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if (!m_d2dCtx) return;
+    m_d2dCtx->BeginDraw();
+    m_d2dCtx->Clear(D2D1_COLOR_F{ 0.0f, 0.0f, 0.0f, 0.0f });
 }
 
 void Overlay::EndDraw()
 {
-    POINT srcPt{ 0, 0 };
-    SIZE  size{ m_width, m_height };
-    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    UpdateLayeredWindow(m_hwnd, nullptr, nullptr, &size, m_memDC,
-                        &srcPt, m_key, &blend, ULW_COLORKEY);
+    if (!m_d2dCtx || !m_swapChain) return;
+    m_d2dCtx->EndDraw();
+    m_swapChain->Present(0, 0);
 }
 
-void Overlay::DrawRect(int x, int y, int w, int h, COLORREF color, int thickness)
+void Overlay::DrawRect(int x, int y, int w, int h, COLORREF color, int thickness, uint8_t alpha)
 {
-    // Рисуем через FillRect (а не перо), т.к. перьевая отрисовка на
-    // 32-битном DIB-секции не рендерится в layered-окне.
-    if (w <= 0 || h <= 0)
-        return;
-
-    int t = thickness < 1 ? 1 : thickness;
-    if (w < 2 * t) t = w / 2;
-    if (h < 2 * t) t = h / 2;
-    if (t < 1) t = 1;
-
-    // верх + низ
-    DrawFilledRect(x, y,         w, t, color);
-    DrawFilledRect(x, y + h - t, w, t, color);
-    // лево + право (без перекрытия углов уже залитых)
-    DrawFilledRect(x,         y + t, t, h - 2 * t, color);
-    DrawFilledRect(x + w - t, y + t, t, h - 2 * t, color);
+    if (!m_d2dCtx || w <= 0 || h <= 0) return;
+    const float t    = static_cast<float>(thickness < 1 ? 1 : thickness);
+    const float half = t * 0.5f;
+    m_brush->SetColor(ToD2D(color, alpha));
+    m_d2dCtx->DrawRectangle(
+        D2D1_RECT_F{
+            static_cast<float>(x) + half,
+            static_cast<float>(y) + half,
+            static_cast<float>(x + w) - half,
+            static_cast<float>(y + h) - half
+        },
+        m_brush.Get(), t);
 }
 
-void Overlay::DrawFilledRect(int x, int y, int w, int h, COLORREF color)
+void Overlay::DrawFilledRect(int x, int y, int w, int h, COLORREF color, uint8_t alpha)
 {
-    RECT r{ x, y, x + w, y + h };
-    SetDCBrushColor(m_memDC, color);
-    FillRect(m_memDC, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if (!m_d2dCtx || w <= 0 || h <= 0) return;
+    m_brush->SetColor(ToD2D(color, alpha));
+    m_d2dCtx->FillRectangle(
+        D2D1_RECT_F{
+            static_cast<float>(x),
+            static_cast<float>(y),
+            static_cast<float>(x + w),
+            static_cast<float>(y + h)
+        },
+        m_brush.Get());
 }
 
-void Overlay::DrawLine(int x1, int y1, int x2, int y2, COLORREF color, int thickness)
+void Overlay::DrawLine(int x1, int y1, int x2, int y2, COLORREF color, int thickness, uint8_t alpha)
 {
-    // DDA-линия из залитых квадратов (бруш), обходя проблему с пером.
-    int t = thickness < 1 ? 1 : thickness;
-    int dx = x2 - x1;
-    int dy = y2 - y1;
-    int steps = std::max(std::abs(dx), std::abs(dy));
-    int half = t / 2;
+    if (!m_d2dCtx) return;
+    const float t = static_cast<float>(thickness < 1 ? 1 : thickness);
+    m_brush->SetColor(ToD2D(color, alpha));
+    m_d2dCtx->DrawLine(
+        D2D1_POINT_2F{ static_cast<float>(x1), static_cast<float>(y1) },
+        D2D1_POINT_2F{ static_cast<float>(x2), static_cast<float>(y2) },
+        m_brush.Get(), t);
+}
 
-    if (steps == 0)
+void Overlay::DrawText(int x, int y, const wchar_t* text, int height, COLORREF color, bool bold, uint8_t alpha)
+{
+    if (!m_d2dCtx || !m_dwrite || !text) return;
+
+    if (!m_textFormat || m_txtH != height || m_txtBold != bold)
     {
-        DrawFilledRect(x1 - half, y1 - half, t, t, color);
-        return;
-    }
-
-    for (int i = 0; i <= steps; ++i)
-    {
-        int x = x1 + (int)((double)dx * i / steps);
-        int y = y1 + (int)((double)dy * i / steps);
-        DrawFilledRect(x - half, y - half, t, t, color);
-    }
-}
-
-void Overlay::DrawText(int x, int y, const wchar_t* text, int height, COLORREF color, bool bold)
-{
-    // Кешируем шрифт: пересоздаём только если изменились высота/жирность.
-    if (!m_txtFont || m_txtH != height || m_txtBold != bold)
-    {
-        if (m_txtFont) DeleteObject(m_txtFont);
-        m_txtFont = CreateFontW(-height, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
-                                FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        m_txtH = height;
+        m_textFormat.Reset();
+        m_dwrite->CreateTextFormat(
+            L"Segoe UI",
+            nullptr,
+            bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            static_cast<float>(height) * 0.90f,
+            L"",
+            &m_textFormat);
+        m_txtH    = height;
         m_txtBold = bold;
     }
-    HGDIOBJ oldFont = SelectObject(m_memDC, m_txtFont);
-    SetBkMode(m_memDC, TRANSPARENT);
-    SetTextColor(m_memDC, color);
-    TextOutW(m_memDC, x, y, text, (int)wcslen(text));
-    SelectObject(m_memDC, oldFont);
-}
+    if (!m_textFormat) return;
 
-bool Overlay::DumpRaw(const wchar_t* path) const
-{
-    if (!m_bits)
-        return false;
-    FILE* f = _wfopen(path, L"wb");
-    if (!f)
-        return false;
-    const uint32_t w = static_cast<uint32_t>(m_width);
-    const uint32_t h = static_cast<uint32_t>(m_height);
-    fwrite(&w, sizeof(w), 1, f);
-    fwrite(&h, sizeof(h), 1, f);
-    fwrite(m_bits, 1, static_cast<size_t>(w) * h * 4, f);
-    fclose(f);
-    return true;
+    m_brush->SetColor(ToD2D(color, alpha));
+#pragma push_macro("DrawText")
+#undef DrawText
+    m_d2dCtx->DrawText(
+        text,
+        static_cast<UINT32>(wcslen(text)),
+        m_textFormat.Get(),
+        D2D1_RECT_F{
+            static_cast<float>(x),
+            static_cast<float>(y),
+            static_cast<float>(m_width),
+            static_cast<float>(m_height)
+        },
+        m_brush.Get());
+#pragma pop_macro("DrawText")
 }
