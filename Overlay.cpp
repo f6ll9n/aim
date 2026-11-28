@@ -81,6 +81,10 @@ bool Overlay::InitDirect2D()
     if (FAILED(m_d3dDevice.As(&dxgiDevice)))
         return false;
 
+    ComPtr<IDXGIDevice1> dxgiDevice1;
+    if (SUCCEEDED(dxgiDevice.As(&dxgiDevice1)))
+        dxgiDevice1->SetMaximumFrameLatency(1);
+
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
                                  __uuidof(ID2D1Factory1), nullptr,
                                  reinterpret_cast<void**>(m_d2dFactory.GetAddressOf()))))

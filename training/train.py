@@ -90,15 +90,31 @@ def main() -> None:
     ap.add_argument("--patience", type=int, default=20)  # early stopping: стоп через N эпох без роста mAP
     ap.add_argument("--val-ratio", type=float, default=0.2)
     ap.add_argument("--seed",   type=int, default=0)
+    ap.add_argument("--split-only", action="store_true",
+                    help="только пересобрать train/val сплит без запуска обучения")
     args = ap.parse_args()
 
     split_dataset(args.val_ratio, args.seed)
+    if args.split_only:
+        return
 
     from ultralytics import YOLO
 
+    # Пишем временный yaml с абсолютным path — в Colab относительный `path: dataset`
+    # иногда резолвится не туда (в /content/datasets).
+    run_yaml = ROOT / "dataset" / "_data_resolved.yaml"
+    orig_yaml = (DATASET / "data.yaml").read_text(encoding="utf-8")
+    lines_yaml = []
+    for ln in orig_yaml.splitlines():
+        if ln.strip().startswith("path:"):
+            lines_yaml.append(f"path: {DATASET.resolve().as_posix()}")
+        else:
+            lines_yaml.append(ln)
+    run_yaml.write_text("\n".join(lines_yaml) + "\n", encoding="utf-8")
+
     model = YOLO(args.model)
     model.train(
-        data=str(DATASET / "data.yaml"),
+        data=str(run_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,

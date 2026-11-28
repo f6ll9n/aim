@@ -9,7 +9,7 @@ struct IDXGISwapChain;
 struct ID3D11RenderTargetView;
 
 // ============================================================================
-//  Menu — Skeet / GameSense-стиль меню на DX11 + ImGui.
+//  Menu — Skeet / GameSense-стиль меню на DX11 + ImGui с плавными анимациями.
 //  По умолчанию использует WS_EX_NOACTIVATE + MA_NOACTIVATE: открывается поверх
 //  игры (в режиме без рамок / окне), не перехватывая фокус и не сворачивая её.
 // ============================================================================
@@ -24,9 +24,13 @@ public:
     bool Create(HINSTANCE hInst, int screenW, int screenH);
 
     void Destroy();
-    void Toggle(bool grabFocus = false) { SetVisible(!m_visible, grabFocus); }
+    void Toggle(bool grabFocus = false) { SetVisible(!IsVisible(), grabFocus); }
     void SetVisible(bool v, bool grabFocus = false);
-    bool IsVisible()   const noexcept { return m_visible; }
+
+    // Во время анимации закрытия IsVisible() уже false (чтобы не блокировать аим),
+    // но окно доигрывает короткий fade-out до конца.
+    bool IsVisible()   const noexcept { return m_visible && !m_closing; }
+    bool IsOpenOrAnimating() const noexcept { return m_visible; }
     bool IsListening() const noexcept { return m_listening; }
     HWND Handle()      const noexcept { return m_hwnd; }
 
@@ -41,10 +45,12 @@ private:
     void SetStyle();
     void KeyBindTag(int* key, bool allowClear);
 
-    HINSTANCE m_hInst   = nullptr;
-    HWND      m_hwnd    = nullptr;
-    bool      m_visible = false;
+    HINSTANCE m_hInst     = nullptr;
+    HWND      m_hwnd      = nullptr;
+    bool      m_visible   = false;
+    bool      m_closing   = false;
     bool      m_grabFocus = false;
+    float     m_openAnim  = 0.0f;
 
     ID3D11Device*           m_device = nullptr;
     ID3D11DeviceContext*    m_ctx    = nullptr;

@@ -41,6 +41,8 @@ constexpr bool  FORCE_CPU       = false;  // false = пробуем DirectML; ф
 struct SharedAimParams
 {
     std::atomic<bool>  aimEnabled  { true  };
+    std::atomic<bool>  stickyLock  { true  };
+    std::atomic<int>   headMode    { 0     };
     std::atomic<float> confThresh  { 0.30f };
     std::atomic<float> iouThresh   { 0.45f };
     std::atomic<float> headFrac    { 0.30f };
@@ -50,6 +52,7 @@ struct SharedAimParams
     std::atomic<float> aimDeadzone { 8.0f  };
     std::atomic<float> aimMaxStep  { 25.0f };
     std::atomic<int>   aimFov      { 400   };
+    std::atomic<int>   detMaxFps   { 120   };
     std::atomic<int>   aimKey1     { VK_LBUTTON };
     std::atomic<int>   aimKey2     { VK_MENU    };
     std::atomic<bool>  menuVisible { false };
@@ -60,6 +63,8 @@ static SharedAimParams gParams;
 static void SyncParamsFromSettings(const AimSettings& s, bool menuVisible)
 {
     gParams.aimEnabled.store(s.aimEnabled,   std::memory_order_relaxed);
+    gParams.stickyLock.store(s.stickyLock,   std::memory_order_relaxed);
+    gParams.headMode.store(s.headMode,       std::memory_order_relaxed);
     gParams.headFrac.store(s.headFrac,       std::memory_order_relaxed);
     gParams.headConf.store(s.headConf,       std::memory_order_relaxed);
     gParams.smoothness.store(s.smoothness,   std::memory_order_relaxed);
@@ -67,6 +72,7 @@ static void SyncParamsFromSettings(const AimSettings& s, bool menuVisible)
     gParams.aimDeadzone.store(s.aimDeadzone, std::memory_order_relaxed);
     gParams.aimMaxStep.store(s.aimMaxStep,   std::memory_order_relaxed);
     gParams.aimFov.store(s.aimFov,           std::memory_order_relaxed);
+    gParams.detMaxFps.store(s.detMaxFps,     std::memory_order_relaxed);
     gParams.aimKey1.store(s.aimKey1,         std::memory_order_relaxed);
     gParams.aimKey2.store(s.aimKey2,         std::memory_order_relaxed);
     gParams.menuVisible.store(menuVisible,   std::memory_order_relaxed);
@@ -104,6 +110,8 @@ static void LoadConfig(AimSettings& s)
         char* nl = strchr(val, '\n');
         if (nl) *nl = '\0';
         if      (!strcmp(key, "aimEnabled"))    s.aimEnabled    = atoi(val) != 0;
+        else if (!strcmp(key, "stickyLock"))    s.stickyLock    = atoi(val) != 0;
+        else if (!strcmp(key, "headMode"))      s.headMode      = std::clamp(atoi(val), 0, 2);
         else if (!strcmp(key, "headFrac"))      s.headFrac      = std::clamp((float)atof(val), AimSettings::HD_MIN, AimSettings::HD_MAX);
         else if (!strcmp(key, "headConf"))      s.headConf      = std::clamp((float)atof(val), AimSettings::HC_MIN, AimSettings::HC_MAX);
         else if (!strcmp(key, "smoothness"))    s.smoothness    = std::clamp((float)atof(val), AimSettings::SM_MIN, AimSettings::SM_MAX);
@@ -111,10 +119,12 @@ static void LoadConfig(AimSettings& s)
         else if (!strcmp(key, "aimDeadzone"))   s.aimDeadzone   = std::clamp((float)atof(val), AimSettings::DZ_MIN, AimSettings::DZ_MAX);
         else if (!strcmp(key, "aimMaxStep"))    s.aimMaxStep    = std::clamp((float)atof(val), AimSettings::MS_MIN, AimSettings::MS_MAX);
         else if (!strcmp(key, "aimFov"))        s.aimFov        = std::clamp(atoi(val), AimSettings::AIMFOV_MIN, AimSettings::AIMFOV_MAX);
+        else if (!strcmp(key, "detMaxFps"))     s.detMaxFps     = std::clamp(atoi(val), AimSettings::DETFPS_MIN, AimSettings::DETFPS_MAX);
         else if (!strcmp(key, "uiMaxFps"))      s.uiMaxFps      = std::clamp(atoi(val), AimSettings::UIFPS_MIN,  AimSettings::UIFPS_MAX);
         else if (!strcmp(key, "grabFocus"))     s.grabFocus     = atoi(val) != 0;
         else if (!strcmp(key, "showCrosshair")) s.showCrosshair = atoi(val) != 0;
         else if (!strcmp(key, "showBoxes"))     s.showBoxes     = atoi(val) != 0;
+        else if (!strcmp(key, "showHeadBoxes")) s.showHeadBoxes = atoi(val) != 0;
         else if (!strcmp(key, "showLine"))      s.showLine      = atoi(val) != 0;
         else if (!strcmp(key, "showLog"))       s.showLog       = atoi(val) != 0;
         else if (!strcmp(key, "showFov"))       s.showFov       = atoi(val) != 0;
@@ -132,6 +142,8 @@ static void SaveConfig(const AimSettings& s)
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
     fprintf(f, "aimEnabled=%d\n",      s.aimEnabled ? 1 : 0);
+    fprintf(f, "stickyLock=%d\n",      s.stickyLock ? 1 : 0);
+    fprintf(f, "headMode=%d\n",        s.headMode);
     fprintf(f, "headFrac=%.3f\n",      s.headFrac);
     fprintf(f, "headConf=%.3f\n",      s.headConf);
     fprintf(f, "smoothness=%.3f\n",    s.smoothness);
@@ -139,10 +151,12 @@ static void SaveConfig(const AimSettings& s)
     fprintf(f, "aimDeadzone=%.1f\n",   s.aimDeadzone);
     fprintf(f, "aimMaxStep=%.1f\n",    s.aimMaxStep);
     fprintf(f, "aimFov=%d\n",          s.aimFov);
+    fprintf(f, "detMaxFps=%d\n",       s.detMaxFps);
     fprintf(f, "uiMaxFps=%d\n",        s.uiMaxFps);
     fprintf(f, "grabFocus=%d\n",       s.grabFocus ? 1 : 0);
     fprintf(f, "showCrosshair=%d\n",   s.showCrosshair ? 1 : 0);
     fprintf(f, "showBoxes=%d\n",       s.showBoxes ? 1 : 0);
+    fprintf(f, "showHeadBoxes=%d\n",   s.showHeadBoxes ? 1 : 0);
     fprintf(f, "showLine=%d\n",        s.showLine ? 1 : 0);
     fprintf(f, "showLog=%d\n",         s.showLog ? 1 : 0);
     fprintf(f, "showFov=%d\n",         s.showFov ? 1 : 0);
@@ -169,6 +183,23 @@ static void Fatal(const wchar_t* msg)
     MessageBoxW(nullptr, msg, L"capture_demo", MB_ICONERROR | MB_OK);
 }
 
+static void WaitMicroseconds(HANDLE timer, std::chrono::microseconds rem)
+{
+    if (rem <= std::chrono::microseconds(400))
+        return;
+    if (timer)
+    {
+        LARGE_INTEGER due{};
+        due.QuadPart = -(std::chrono::duration_cast<std::chrono::nanoseconds>(rem).count() / 100);
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    std::this_thread::sleep_for(rem);
+}
+
 static void MoveMouse(int dx, int dy)
 {
     if (dx == 0 && dy == 0) return;
@@ -181,9 +212,9 @@ static void MoveMouse(int dx, int dy)
 }
 
 // --- трекер: подавление ложных срабатываний временной стабилизацией ---
-constexpr float TRACK_IOU = 0.30f;
+constexpr float TRACK_IOU = 0.25f;
 constexpr int   MIN_AGE   = 2;
-constexpr int   MAX_GAP   = 3;
+constexpr int   MAX_GAP   = 2;   // ~16 мс анти-мерцания, затем быстрый автосвап при смерти цели
 
 struct Track
 {
@@ -209,46 +240,106 @@ static void ApplyDetections(const std::vector<Detection>& last,
                             std::vector<Track>& tracks,
                             std::vector<Detection>& stable,
                             std::vector<int>& stableIds,
-                            float ema)
+                            float ema,
+                            int classId = 0,
+                            int minAge  = MIN_AGE,
+                            int maxGap  = MAX_GAP)
 {
     for (auto& t : tracks) ++t.gap;
-    for (const auto& d : last)
+
+    const size_t nDet = last.size();
+    const size_t nTrk = tracks.size();
+    std::vector<uint8_t> detUsed(nDet, 0);
+    std::vector<uint8_t> trkUsed(nTrk, 0);
+
+    auto updateTrack = [&](Track& trk, const Detection& d)
     {
-        Track* match = nullptr;
-        float best = TRACK_IOU;
-        for (auto& t : tracks)
+        trk.x = trk.x * (1.f - ema) + d.x * ema;
+        trk.y = trk.y * (1.f - ema) + d.y * ema;
+        trk.w = trk.w * (1.f - ema) + d.w * ema;
+        trk.h = trk.h * (1.f - ema) + d.h * ema;
+        trk.conf = d.confidence;
+        ++trk.age;
+        trk.gap = 0;
+    };
+
+    // Этап 1: 1-к-1 сопоставление по IoU (исключает слипание двух врагов в один трек).
+    for (size_t di = 0; di < nDet; ++di)
+    {
+        const auto& d = last[di];
+        int   bestTi  = -1;
+        float bestIoU = TRACK_IOU;
+        for (size_t ti = 0; ti < nTrk; ++ti)
         {
-            float iou = BoxIoU(t.x, t.y, t.w, t.h, d.x, d.y, d.w, d.h);
-            if (iou > best) { best = iou; match = &t; }
+            if (trkUsed[ti]) continue;
+            float iou = BoxIoU(tracks[ti].x, tracks[ti].y, tracks[ti].w, tracks[ti].h,
+                               d.x, d.y, d.w, d.h);
+            if (iou > bestIoU) { bestIoU = iou; bestTi = static_cast<int>(ti); }
         }
-        if (match)
+        if (bestTi >= 0)
         {
-            match->x = match->x * (1.f - ema) + d.x * ema;
-            match->y = match->y * (1.f - ema) + d.y * ema;
-            match->w = match->w * (1.f - ema) + d.w * ema;
-            match->h = match->h * (1.f - ema) + d.h * ema;
-            match->conf = d.confidence;
-            ++match->age;
-            match->gap = 0;
+            updateTrack(tracks[bestTi], d);
+            detUsed[di] = 1;
+            trkUsed[bestTi] = 1;
+        }
+    }
+
+    // Этап 2: fallback по дистанции центров для оставшихся пар — при резком движении
+    // камеры/мыши бокс может сместиться на 40-90 px (IoU=0), но ID цели не должен теряться.
+    for (size_t di = 0; di < nDet; ++di)
+    {
+        if (detUsed[di]) continue;
+        const auto& d = last[di];
+        const float dcx = d.x + d.w * 0.5f;
+        const float dcy = d.y + d.h * 0.5f;
+
+        int   bestTi   = -1;
+        float bestDist = 1e9f;
+        for (size_t ti = 0; ti < nTrk; ++ti)
+        {
+            if (trkUsed[ti]) continue;
+            const auto& t = tracks[ti];
+            float maxShift = std::max(85.f, std::max(t.w, t.h) * 1.80f);
+            float tcx = t.x + t.w * 0.5f;
+            float tcy = t.y + t.h * 0.5f;
+            float dx  = dcx - tcx;
+            float dy  = dcy - tcy;
+            float dist2 = dx * dx + dy * dy;
+            if (dist2 <= maxShift * maxShift && dist2 < bestDist)
+            {
+                bestDist = dist2;
+                bestTi   = static_cast<int>(ti);
+            }
+        }
+        if (bestTi >= 0)
+        {
+            updateTrack(tracks[bestTi], d);
+            detUsed[di] = 1;
+            trkUsed[bestTi] = 1;
         }
         else
         {
             tracks.push_back({ d.x, d.y, d.w, d.h, d.confidence, 1, 0, NextTrackId() });
         }
     }
+
     tracks.erase(
         std::remove_if(tracks.begin(), tracks.end(),
-                       [](const Track& t) { return t.gap > MAX_GAP; }),
+                       [maxGap](const Track& t) { return t.gap > maxGap; }),
         tracks.end());
 
+    // В stable отдаём ТОЛЬКО треки, подтверждённые на текущем кадре (gap == 0),
+    // чтобы аим никогда не тянул прицел к старым «призрачным» координатам.
     stable.clear();
     stableIds.clear();
     for (const auto& t : tracks)
-        if (t.age >= MIN_AGE)
+    {
+        if (t.gap == 0 && t.age >= minAge)
         {
-            stable.push_back({ t.x, t.y, t.w, t.h, t.conf, 0 });
+            stable.push_back({ t.x, t.y, t.w, t.h, t.conf, classId });
             stableIds.push_back(t.id);
         }
+    }
 }
 
 // Канал «кадр»: zero-copy swap из потока захвата в поток инференса.
@@ -266,11 +357,13 @@ struct FrameChannel
 struct RenderSnapshot
 {
     std::vector<Detection> stable;
-    int   targetIdx = -1;
-    float aimPx     = 320.f;
-    float aimPy     = 320.f;
-    bool  aimIsHead = false;
-    float maxConf   = 0.f;
+    std::vector<Detection> stableHeads;
+    int   targetIdx     = -1;
+    int   lockedHeadIdx = -1;
+    float aimPx         = 320.f;
+    float aimPy         = 320.f;
+    bool  aimIsHead     = false;
+    float maxConf       = 0.f;
 };
 
 struct DetChannel
@@ -344,11 +437,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     std::atomic<float> gDetFps{ 0.f };
     std::atomic<float> gInfMs { 0.f };
 
-    // Поток захвата: крутит DDA и делает O(1) swap кадра.
+    // Поток захвата: крутит DDA и делает O(1) swap кадра (не быстрее detMaxFps, чтобы не грузить VRAM->RAM).
     std::thread capThread([&]()
     {
+        HANDLE capTimer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         std::vector<uint8_t> stageBuf;
         auto capT = std::chrono::steady_clock::now();
+        auto nextCap = capT;
         int capCnt = 0;
 
         while (running.load(std::memory_order_relaxed))
@@ -379,26 +475,41 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                     capCnt = 0;
                     capT = now;
                 }
+
+                const int lim = gParams.detMaxFps.load(std::memory_order_relaxed);
+                if (lim < AimSettings::DETFPS_MAX)
+                {
+                    const auto period = std::chrono::microseconds(1'000'000 / std::max(30, lim));
+                    nextCap += period;
+                    if (now - nextCap > period * 2)
+                        nextCap = now;
+                    WaitMicroseconds(capTimer, std::chrono::duration_cast<std::chrono::microseconds>(nextCap - now));
+                }
             }
         }
+        if (capTimer) CloseHandle(capTimer);
         fc.cv.notify_all();
     });
 
-    // Поток инференса: YOLO + трекинг + мгновенный aim (0 мс ожидания UI).
+    // Поток инференса: YOLO + трекинг + мгновенный aim (с лимитом DET FPS, чтобы не душить GPU игры).
     std::thread infThread([&]()
     {
+        HANDLE infTimer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         std::vector<uint8_t> priv;
         uint64_t seen = 0;
         uint32_t w = 0, h = 0;
         size_t   stride = 0;
 
-        std::vector<Track>     tracks;
-        std::vector<Detection> stable;
-        std::vector<int>       stableIds;
+        std::vector<Track>     tracks, headTracks;
+        std::vector<Detection> stable, stableHeads;
+        std::vector<int>       stableIds, headIds;
         std::vector<Detection> players, heads;
-        int selectedId = -1;
+        int  selectedId  = -1;
+        bool prevAimHeld = false;
 
         auto   detT      = std::chrono::steady_clock::now();
+        auto   nextInf   = detT;
         int    detCnt    = 0;
         double infSumMs  = 0.0;
 
@@ -424,6 +535,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                 continue;
 
             const bool  aimEn       = gParams.aimEnabled.load(std::memory_order_relaxed);
+            const bool  stickyLock  = gParams.stickyLock.load(std::memory_order_relaxed);
+            const int   headMode    = gParams.headMode.load(std::memory_order_relaxed);
             const float confThresh  = gParams.confThresh.load(std::memory_order_relaxed);
             const float iouThresh   = gParams.iouThresh.load(std::memory_order_relaxed);
             const float headFrac    = gParams.headFrac.load(std::memory_order_relaxed);
@@ -437,22 +550,42 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             const int   key2        = gParams.aimKey2.load(std::memory_order_relaxed);
             const bool  menuOpen    = gParams.menuVisible.load(std::memory_order_relaxed);
 
+            // Порог детекции для YOLO — минимум из player/head, чтобы headConf работал независимо.
+            const float detConf = (headMode != 2) ? std::min(confThresh, headConf) : confThresh;
+
             auto t0 = std::chrono::steady_clock::now();
             cv::Mat frame(static_cast<int>(h), static_cast<int>(w), CV_8UC4,
                           priv.data(), stride);
-            auto last = det.Detect(frame, confThresh, iouThresh);
+            auto last = det.Detect(frame, detConf, iouThresh);
             auto t1 = std::chrono::steady_clock::now();
             infSumMs += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-            // Разделяем: 0 = player, 1 = head.
+            // Разделяем: 0 = player (>= confThresh), 1 = head (>= headConf).
             players.clear();
             heads.clear();
             for (const auto& d : last)
-                (d.classId == 0 ? players : heads).push_back(d);
+            {
+                if (d.classId == 0 && d.confidence >= confThresh)
+                    players.push_back(d);
+                else if (d.classId == 1 && d.confidence >= headConf && headMode != 2)
+                    heads.push_back(d);
+            }
 
-            ApplyDetections(players, tracks, stable, stableIds, 1.0f - smoothness);
+            const float ema = 1.0f - smoothness;
+            ApplyDetections(players, tracks,     stable,      stableIds, ema, 0, MIN_AGE, MAX_GAP);
+            ApplyDetections(heads,   headTracks, stableHeads, headIds,   ema, 1, 1,       2);
 
-            // --- выбор цели: ближайшая к прицелу, с гистерезисом ---
+            const bool aimHeld = aimEn && !menuOpen &&
+                (((key1 > 0) && (GetAsyncKeyState(key1) & 0x8000) != 0) ||
+                 ((key2 > 0) && (GetAsyncKeyState(key2) & 0x8000) != 0));
+
+            // При отпускании клавиши аима сразу сбрасываем прошлый лок,
+            // чтобы следующее нажатие взяло ближайшую к прицелу цель.
+            if (prevAimHeld && !aimHeld)
+                selectedId = -1;
+            prevAimHeld = aimHeld;
+
+            // --- выбор цели: жёсткий лок при удержании клавиши аима ---
             auto sqDist = [&](const Detection& d)
             {
                 float dx = (d.x + d.w * 0.5f) - fovCx;
@@ -482,94 +615,170 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             for (size_t i = 0; i < stable.size(); ++i)
                 if (stableIds[i] == selectedId) { selIdx = static_cast<int>(i); break; }
 
+            // Вышел ли выбранный трек за пределы aimFov (тогда свапаем сразу, не ждём).
+            bool selOutOfZone = false;
             if (selIdx >= 0 && !inZone(stable[selIdx]))
-                selIdx = -1;
+            {
+                selIdx       = -1;
+                selOutOfZone = true;
+            }
+
+            // Жив ли выбранный трек в памяти трекера (1-2 кадра мерцания, пока он не умер).
+            bool selAliveInTracks = false;
+            if (selectedId > 0 && !selOutOfZone)
+            {
+                for (const auto& t : tracks)
+                {
+                    if (t.id == selectedId)
+                    {
+                        // Если трек в tracks, но сам бокс ушёл из зоны FOV — не блокируем автосвап.
+                        selAliveInTracks =
+                            std::abs((t.x + t.w * 0.5f) - fovCx) <= aimHalf &&
+                            std::abs((t.y + t.h * 0.5f) - fovCy) <= aimHalf;
+                        break;
+                    }
+                }
+            }
 
             int targetIdx = -1;
-            if (selIdx >= 0)
+            if (aimHeld)
             {
-                float selDist = sqDist(stable[selIdx]);
-                if (candIdx >= 0 && candDist < selDist * AIM_SWITCH_HYST)
+                if (selIdx >= 0)
+                {
+                    targetIdx = selIdx;   // цель жива и в FOV — держим жёстко, не прыгаем на других
+                }
+                else if (stickyLock && selAliveInTracks)
+                {
+                    // Короткое ожидание (<= 2 кадра) на случай мерцания, пока цель ещё жива.
+                    targetIdx = -1;
+                }
+                else if (candIdx >= 0)
+                {
+                    // Цель умерла или вышла из FOV — автосвапаем на ближайшую без отпускания кнопки.
+                    targetIdx  = candIdx;
+                    selectedId = stableIds[candIdx];
+                }
+                else
+                {
+                    targetIdx  = -1;
+                    selectedId = -1;
+                }
+            }
+            else
+            {
+                if (selIdx >= 0)
+                {
+                    float selDist = sqDist(stable[selIdx]);
+                    if (candIdx >= 0 && candDist < selDist * 0.55f)
+                    {
+                        targetIdx  = candIdx;
+                        selectedId = stableIds[candIdx];
+                    }
+                    else
+                    {
+                        targetIdx = selIdx;
+                    }
+                }
+                else if (candIdx >= 0)
                 {
                     targetIdx  = candIdx;
                     selectedId = stableIds[candIdx];
                 }
                 else
                 {
-                    targetIdx = selIdx;
+                    targetIdx  = -1;
+                    selectedId = -1;
                 }
             }
-            else if (candIdx >= 0)
+
+            // Головы учитываются ТОЛЬКО строго внутри модельки персонажа (верхние 65% бокса).
+            auto headInsidePlayer = [](const Detection& hd, const Detection& pl)
             {
-                targetIdx  = candIdx;
-                selectedId = stableIds[candIdx];
-            }
-            else
+                float hcx = hd.x + hd.w * 0.5f;
+                float hcy = hd.y + hd.h * 0.5f;
+                return hcx >= pl.x && hcx <= pl.x + pl.w &&
+                       hcy >= pl.y && hcy <= pl.y + pl.h * 0.65f;
+            };
+
+            std::vector<Detection> validHeads;
+            validHeads.reserve(stableHeads.size());
+            for (const auto& hd : stableHeads)
             {
-                targetIdx  = -1;
-                selectedId = -1;
+                for (const auto& pl : stable)
+                {
+                    if (headInsidePlayer(hd, pl))
+                    {
+                        validHeads.push_back(hd);
+                        break;
+                    }
+                }
             }
 
-            float aimPx     = fovCx;
-            float aimPy     = fovCy;
-            bool  aimIsHead = false;
+            float aimPx         = fovCx;
+            float aimPy         = fovCy;
+            bool  aimIsHead     = false;
+            bool  hasLock       = false;
+            int   lockedHeadIdx = -1;
 
             if (targetIdx >= 0)
             {
                 const Detection& t = stable[targetIdx];
-                const Detection* hBox = nullptr;
-                for (const auto& hd : heads)
+                if (headMode != 2)
                 {
-                    if (hd.confidence < headConf) continue;
-                    float hcx = hd.x + hd.w * 0.5f;
-                    float hcy = hd.y + hd.h * 0.5f;
-                    if (hcx >= t.x && hcx <= t.x + t.w &&
-                        hcy >= t.y && hcy <= t.y + t.h)
+                    float bestScore = -1.0f;
+                    for (size_t hi = 0; hi < validHeads.size(); ++hi)
                     {
-                        if (!hBox || hd.confidence > hBox->confidence)
-                            hBox = &hd;
+                        const auto& hd = validHeads[hi];
+                        if (headInsidePlayer(hd, t) && hd.confidence > bestScore)
+                        {
+                            bestScore     = hd.confidence;
+                            lockedHeadIdx = static_cast<int>(hi);
+                        }
                     }
                 }
-                aimIsHead = (hBox != nullptr);
-                if (hBox)
-                {
-                    aimPx = hBox->x + hBox->w * 0.5f;
-                    aimPy = hBox->y + hBox->h * 0.5f;
-                }
-                else
-                {
-                    aimPx = t.x + t.w * 0.5f;
-                    aimPy = t.y + t.h * headFrac;
-                }
 
-                bool aimHeld = aimEn && !menuOpen &&
-                    (((key1 > 0) && (GetAsyncKeyState(key1) & 0x8000) != 0) ||
-                     ((key2 > 0) && (GetAsyncKeyState(key2) & 0x8000) != 0));
-
-                if (aimHeld)
+                if (lockedHeadIdx >= 0)
                 {
-                    float dx   = aimPx - fovCx;
-                    float dy   = aimPy - fovCy;
-                    float dist = std::sqrt(dx * dx + dy * dy);
-                    if (dist > aimDeadzone)
-                    {
-                        float step = dist * aimStrength;
-                        if (step > aimMaxStep) step = aimMaxStep;
-                        MoveMouse(static_cast<int>(std::lround(dx / dist * step)),
-                                  static_cast<int>(std::lround(dy / dist * step)));
-                    }
+                    const auto& hd = validHeads[lockedHeadIdx];
+                    aimPx     = hd.x + hd.w * 0.5f;
+                    aimPy     = hd.y + hd.h * 0.5f;
+                    aimIsHead = true;
+                    hasLock   = true;
+                }
+                else if (headMode != 1)
+                {
+                    aimPx     = t.x + t.w * 0.5f;
+                    aimPy     = t.y + t.h * headFrac;
+                    aimIsHead = false;
+                    hasLock   = true;
+                }
+            }
+
+            if (hasLock && aimHeld)
+            {
+                float dx   = aimPx - fovCx;
+                float dy   = aimPy - fovCy;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > aimDeadzone)
+                {
+                    float step = dist * aimStrength;
+                    if (step > aimMaxStep) step = aimMaxStep;
+                    MoveMouse(static_cast<int>(std::lround(dx / dist * step)),
+                              static_cast<int>(std::lround(dy / dist * step)));
                 }
             }
 
             // Публикуем снапшот для оверлея
             {
                 std::lock_guard<std::mutex> lk(dc.mtx);
-                dc.snap.stable    = stable;
-                dc.snap.targetIdx = targetIdx;
-                dc.snap.aimPx     = aimPx;
-                dc.snap.aimPy     = aimPy;
-                dc.snap.aimIsHead = aimIsHead;
-                dc.snap.maxConf   = det.LastMaxConf();
+                dc.snap.stable        = stable;
+                dc.snap.stableHeads   = std::move(validHeads);
+                dc.snap.targetIdx     = targetIdx;
+                dc.snap.lockedHeadIdx = lockedHeadIdx;
+                dc.snap.aimPx         = aimPx;
+                dc.snap.aimPy         = aimPy;
+                dc.snap.aimIsHead     = aimIsHead;
+                dc.snap.maxConf       = det.LastMaxConf();
                 ++dc.stamp;
             }
 
@@ -584,7 +793,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                 infSumMs = 0.0;
                 detT     = now;
             }
+
+            // Пауза между инференсами по лимиту detMaxFps, чтобы GPU успевала рендерить игру.
+            const int detLim = gParams.detMaxFps.load(std::memory_order_relaxed);
+            if (detLim < AimSettings::DETFPS_MAX)
+            {
+                const auto period = std::chrono::microseconds(1'000'000 / std::max(30, detLim));
+                nextInf += period;
+                if (now - nextInf > period * 2)
+                    nextInf = now;
+                WaitMicroseconds(infTimer, std::chrono::duration_cast<std::chrono::microseconds>(nextInf - now));
+            }
         }
+        if (infTimer) CloseHandle(infTimer);
     });
 
     // Высокоточный таймер Windows 10/11 для точного 144/240 FPS пейсинга без лишнего CPU-спина.
@@ -592,12 +813,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
     RenderSnapshot snap;
-    uint64_t lastDetStamp = 0;
-    bool     menuNPrev    = false;
-    bool     prevMenuVis  = menu.IsVisible();
+    uint64_t lastDetStamp  = 0;
+    bool     menuNPrev     = false;
+    bool     prevMenuVis   = menu.IsVisible();
+    bool     prevAimHeldUi = false;
+    bool     firstOverlay  = true;
 
     double uiFps = 0.0;
     auto   fpsT  = std::chrono::steady_clock::now();
+    auto   hudT  = fpsT;
     int    uiCnt = 0;
 
     auto nextFrame = std::chrono::steady_clock::now();
@@ -621,7 +845,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         menuNPrev = nDown;
 
         // Если меню только что закрыли (N/Insert или крестик) — автосохранение конфига.
-        bool curMenuVis = menu.IsVisible();
+        bool curMenuVis  = menu.IsVisible();
+        bool menuActive  = menu.IsOpenOrAnimating();
+        bool menuToggled = (prevMenuVis != curMenuVis);
         if (prevMenuVis && !curMenuVis)
             SaveConfig(s);
         prevMenuVis = curMenuVis;
@@ -631,21 +857,40 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
              ((s.aimKey2 > 0) && (GetAsyncKeyState(s.aimKey2) & 0x8000) != 0));
 
         // Забираем свежий снапшот от потока инференса (если обновился)
+        bool freshDet = false;
         {
             std::lock_guard<std::mutex> lk(dc.mtx);
             if (dc.stamp != lastDetStamp)
             {
                 lastDetStamp = dc.stamp;
                 snap = dc.snap;
+                freshDet = true;
             }
         }
+
+        const auto nowLoop = std::chrono::steady_clock::now();
+        const bool hudTick = (nowLoop - hudT) >= std::chrono::milliseconds(500);
+        const bool overlayDirty = firstOverlay || freshDet || menuToggled ||
+                                  menuActive || (aimHeldUi != prevAimHeldUi) || hudTick;
+        prevAimHeldUi = aimHeldUi;
+        if (hudTick) hudT = nowLoop;
+        firstOverlay = false;
 
         const Detection* target =
             (snap.targetIdx >= 0 && snap.targetIdx < static_cast<int>(snap.stable.size()))
                 ? &snap.stable[snap.targetIdx] : nullptr;
+        const bool hasHeadLock =
+            (snap.lockedHeadIdx >= 0 && snap.lockedHeadIdx < static_cast<int>(snap.stableHeads.size()));
+        const bool hasLock = (target != nullptr && s.headMode != 1) || hasHeadLock;
 
-        // --- отрисовка оверлея (Direct2D + DirectComposition) ---
-        overlay.BeginDraw();
+        const float capFps = gCapFps.load(std::memory_order_relaxed);
+        const float detFps = gDetFps.load(std::memory_order_relaxed);
+        const float infMs  = gInfMs.load(std::memory_order_relaxed);
+
+        // --- отрисовка оверлея только при реальном изменении (убирает фризы DWM/MPO) ---
+        if (overlayDirty)
+        {
+            overlay.BeginDraw();
 
         const int crossX = cap.CropRect().left + static_cast<int>(fovCx);
         const int crossY = cap.CropRect().top  + static_cast<int>(fovCy);
@@ -655,12 +900,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             overlay.DrawFilledRect(crossX - 1, crossY - 6, 3, 13, RGB(255, 255, 255));
         }
 
-        if (target && s.showLine)
+        if (hasLock && s.showLine)
         {
             int tx = cap.CropRect().left + static_cast<int>(snap.aimPx);
             int ty = cap.CropRect().top  + static_cast<int>(snap.aimPy);
-            overlay.DrawLine(crossX, crossY, tx, ty, RGB(0, 255, 255), 2);
-            overlay.DrawFilledRect(tx - 3, ty - 3, 7, 7, RGB(0, 255, 255));
+            COLORREF lineCol = snap.aimIsHead ? RGB(154, 222, 42) : RGB(0, 255, 255);
+            overlay.DrawLine(crossX, crossY, tx, ty, lineCol, 2);
+            overlay.DrawFilledRect(tx - 3, ty - 3, 7, 7, lineCol);
         }
 
         if (s.showBoxes)
@@ -685,9 +931,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             }
         }
 
-        const float capFps = gCapFps.load(std::memory_order_relaxed);
-        const float detFps = gDetFps.load(std::memory_order_relaxed);
-        const float infMs  = gInfMs.load(std::memory_order_relaxed);
+        if (s.showHeadBoxes)
+        {
+            for (size_t i = 0; i < snap.stableHeads.size(); ++i)
+            {
+                const auto& hd = snap.stableHeads[i];
+                int x = cap.CropRect().left + static_cast<int>(hd.x);
+                int y = cap.CropRect().top  + static_cast<int>(hd.y);
+                int w = static_cast<int>(hd.w);
+                int h = static_cast<int>(hd.h);
+
+                bool isLockedHead = (static_cast<int>(i) == snap.lockedHeadIdx);
+                overlay.DrawRect(x, y, w, h,
+                                 isLockedHead ? RGB(154, 222, 42) : RGB(255, 175, 40),
+                                 isLockedHead ? 2 : 1);
+            }
+        }
 
         if (s.showLog)
         {
@@ -697,24 +956,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             overlay.DrawRect(px, py, panelW, panelH, RGB(60, 65, 75), 1);
 
             wchar_t line[128];
-            swprintf(line, 128, L"TARGETS: %zu", snap.stable.size());
+            swprintf(line, 128, L"TARGETS: %zu (H:%zu)", snap.stable.size(), snap.stableHeads.size());
             overlay.DrawText(px + 10, py + 8,  line, 16, RGB(255, 90, 90), true);
             swprintf(line, 128, L"MODE: %s (%.1f ms)", det.UseGpu() ? L"DML" : L"CPU", infMs);
             overlay.DrawText(px + 10, py + 30, line, 15, RGB(255, 200, 90), false);
+            const wchar_t* partTxt = snap.aimIsHead ? L"HEAD" : L"BODY";
             swprintf(line, 128, L"AIM: %s %s sm%.2f", aimHeldUi ? L"ON" : L"OFF",
-                     (target && snap.aimIsHead) ? L"HEAD" : L"BODY", s.smoothness);
+                     hasLock ? partTxt : L"-", s.smoothness);
             overlay.DrawText(px + 10, py + 52, line, 15,
                              aimHeldUi ? RGB(0, 220, 120) : RGB(150, 150, 155), false);
             swprintf(line, 128, L"CAP: %.0f  DET: %.0f fps", capFps, detFps);
             overlay.DrawText(px + 10, py + 74, line, 15, RGB(120, 220, 120), false);
             swprintf(line, 128, L"UI: %.0f fps", uiFps);
             overlay.DrawText(px + 10, py + 96, line, 15, RGB(120, 175, 240), false);
-            if (target)
+            if (hasLock)
                 swprintf(line, 128, L"LOCK: %+.0f, %+.0f", snap.aimPx - fovCx, snap.aimPy - fovCy);
             else
                 swprintf(line, 128, L"LOCK: none");
             overlay.DrawText(px + 10, py + 118, line, 15,
-                             target ? RGB(0, 255, 255) : RGB(140, 140, 145), false);
+                             hasLock ? RGB(0, 255, 255) : RGB(140, 140, 145), false);
         }
 
         if (s.showFov)
@@ -725,6 +985,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         }
 
         overlay.EndDraw();
+        } // end if (overlayDirty)
 
         // --- рендер меню (ImGui + DX11), если открыто ---
         {
@@ -761,31 +1022,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             }
         }
 
-        // --- точный frame pacer (не прибавляет sleep поверх времени рендера) ---
-        if (s.uiMaxFps < AimSettings::UIFPS_MAX)
+        // --- точный frame pacer ---
         {
-            const auto period = std::chrono::microseconds(1'000'000 / std::max(30, s.uiMaxFps));
+            const int uiLim = std::clamp(s.uiMaxFps, AimSettings::UIFPS_MIN, AimSettings::UIFPS_MAX);
+            const auto period = std::chrono::microseconds(1'000'000 / uiLim);
             nextFrame += period;
             auto now = std::chrono::steady_clock::now();
             if (now - nextFrame > period * 2)
                 nextFrame = now;
-
-            auto rem = nextFrame - now;
-            if (rem > std::chrono::microseconds(500))
-            {
-                if (waitTimer)
-                {
-                    LARGE_INTEGER due{};
-                    // 100-нс интервалы со знаком минус = относительное ожидание
-                    due.QuadPart = -(std::chrono::duration_cast<std::chrono::nanoseconds>(rem).count() / 100);
-                    if (SetWaitableTimer(waitTimer, &due, 0, nullptr, nullptr, FALSE))
-                        WaitForSingleObject(waitTimer, INFINITE);
-                }
-                else
-                {
-                    std::this_thread::sleep_for(rem);
-                }
-            }
+            WaitMicroseconds(waitTimer, std::chrono::duration_cast<std::chrono::microseconds>(nextFrame - now));
         }
     }
 

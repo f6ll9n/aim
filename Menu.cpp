@@ -9,7 +9,9 @@
 
 #include <string>
 #include <cstdio>
+#include <cmath>
 #include <algorithm>
+#include <unordered_map>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -17,8 +19,8 @@ namespace
 {
     const wchar_t* kMenuClass = L"BionicAimMenuClass";
 
-    ImFont* g_iconFont = nullptr;
-    ImFont* g_boldFont = nullptr;
+    ImFont* g_iconFont  = nullptr;
+    ImFont* g_boldFont  = nullptr;
     ImFont* g_smallBold = nullptr;
 
     constexpr const char* ICON_AIM    = "\xEF\x81\x9B";  // crosshairs  U+F05B
@@ -35,6 +37,38 @@ namespace
         0,
     };
 
+    // Экспоненциальное сглаживание (не зависит от FPS).
+    inline float SmoothExp(float cur, float target, float speed, float dt)
+    {
+        float k = 1.0f - std::exp(-speed * std::clamp(dt, 0.0f, 0.1f));
+        return cur + (target - cur) * k;
+    }
+
+    inline ImU32 LerpCol(ImU32 a, ImU32 b, float t)
+    {
+        t = std::clamp(t, 0.0f, 1.0f);
+        int ar = (a >>  0) & 0xFF, ag = (a >>  8) & 0xFF, ab = (a >> 16) & 0xFF, aa = (a >> 24) & 0xFF;
+        int br = (b >>  0) & 0xFF, bg = (b >>  8) & 0xFF, bb = (b >> 16) & 0xFF, ba = (b >> 24) & 0xFF;
+        int r = ar + static_cast<int>((br - ar) * t);
+        int g = ag + static_cast<int>((bg - ag) * t);
+        int bl = ab + static_cast<int>((bb - ab) * t);
+        int al = aa + static_cast<int>((ba - aa) * t);
+        return IM_COL32(r, g, bl, al);
+    }
+
+    // Персистентное состояние плавных анимаций виджетов (по ImGuiID).
+    static std::unordered_map<ImGuiID, float> g_animState;
+    inline float AnimVal(const char* idStr, float target, float speed = 16.0f)
+    {
+        ImGuiID id = ImGui::GetID(idStr);
+        auto it = g_animState.find(id);
+        float cur = (it == g_animState.end()) ? target : it->second;
+        cur = SmoothExp(cur, target, speed, ImGui::GetIO().DeltaTime);
+        if (std::abs(cur - target) < 0.001f) cur = target;
+        g_animState[id] = cur;
+        return cur;
+    }
+
     static std::string ExeDir()
     {
         char buf[MAX_PATH];
@@ -48,7 +82,6 @@ namespace
         return s.substr(0, pos + 1);
     }
 
-    // --- состояние текущего групбокса (чтобы колонки не пересекались) ---
     struct GroupBoxState
     {
         ImVec2      p0{};
@@ -86,34 +119,37 @@ namespace
         ImVec2 p0  = g_box.p0;
         ImVec2 p1(p0.x + g_box.width, maxY);
 
+        const float ga = ImGui::GetStyle().Alpha;
+        const int a255 = static_cast<int>(255.0f * ga);
+        const int a230 = static_cast<int>(230.0f * ga);
+
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->ChannelsSetCurrent(0);
-        dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 20, 255));
+        dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 20, a255));
 
         dl->ChannelsSetCurrent(1);
-        dl->AddRect(p0, p1, IM_COL32(42, 42, 42, 255));
+        dl->AddRect(p0, p1, IM_COL32(42, 42, 42, a255));
         dl->AddRect(ImVec2(p0.x + 1.0f, p0.y + 1.0f),
                     ImVec2(p1.x - 1.0f, p1.y - 1.0f),
-                    IM_COL32(10, 10, 10, 255));
+                    IM_COL32(10, 10, 10, a255));
 
-        // Заголовок разрывает верхнюю рамку (фирменный стиль рефа).
         if (g_smallBold) ImGui::PushFont(g_smallBold);
         ImVec2 ts = ImGui::CalcTextSize(g_box.title);
         float tx = p0.x + 12.0f;
         float ty = p0.y - ts.y * 0.5f;
         dl->AddRectFilled(ImVec2(tx - 4.0f, p0.y - 2.0f),
                           ImVec2(tx + ts.x + 4.0f, p0.y + 3.0f),
-                          IM_COL32(20, 20, 20, 255));
-        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, 230), g_box.title);
-        dl->AddText(ImVec2(tx, ty), IM_COL32(226, 226, 226, 255), g_box.title);
+                          IM_COL32(20, 20, 20, a255));
+        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, a230), g_box.title);
+        dl->AddText(ImVec2(tx, ty), IM_COL32(226, 226, 226, a255), g_box.title);
         if (g_smallBold) ImGui::PopFont();
 
         dl->ChannelsMerge();
         ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + 14.0f));
     }
 
-    // Чекбокс 9x9: кислотный градиент при включении + 1px чёрная обводка.
-    bool SkeetCheck(const char* id, const char* label, bool* v, bool* outHovered = nullptr)
+    // Чекбокс 9x9 с плавным переливом заливки и hover-подсветкой.
+    bool SkeetCheck(const char* id, const char* label, bool* v)
     {
         bool changed = false;
         const float boxSz = 9.0f;
@@ -125,46 +161,49 @@ namespace
         ImGui::InvisibleButton(id, ImVec2(boxSz + padX + ts.x, rowH));
         if (ImGui::IsItemClicked()) { *v = !*v; changed = true; }
         bool hovered = ImGui::IsItemHovered();
-        if (outHovered) *outHovered = hovered;
+
+        const float a = ImGui::GetStyle().Alpha;
+        char animKey[96];
+        std::snprintf(animKey, sizeof(animKey), "%s_on", id);
+        float tOn = AnimVal(animKey, *v ? 1.0f : 0.0f, 18.0f);
+        std::snprintf(animKey, sizeof(animKey), "%s_hov", id);
+        float tHov = AnimVal(animKey, hovered ? 1.0f : 0.0f, 20.0f);
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         float by = p.y + (rowH - boxSz) * 0.5f;
         ImVec2 b0(p.x, by), b1(p.x + boxSz, by + boxSz);
 
-        if (*v)
-        {
-            dl->AddRectFilledMultiColor(b0, b1,
-                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
-                IM_COL32(104, 154, 22, 255), IM_COL32(104, 154, 22, 255));
-        }
-        else
-        {
-            dl->AddRectFilledMultiColor(b0, b1,
-                IM_COL32(48, 48, 48, 255), IM_COL32(48, 48, 48, 255),
-                IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255));
-        }
-        dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
-                    ImVec2(b1.x + 1.0f, b1.y + 1.0f),
-                    hovered ? IM_COL32(75, 75, 75, 255) : IM_COL32(8, 8, 8, 255));
+        ImU32 topC = LerpCol(IM_COL32(48, 48, 48, 255), IM_COL32(154, 222, 42, 255), tOn);
+        ImU32 botC = LerpCol(IM_COL32(34, 34, 34, 255), IM_COL32(104, 154, 22, 255), tOn);
+        topC = (topC & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        botC = (botC & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        dl->AddRectFilledMultiColor(b0, b1, topC, topC, botC, botC);
 
-        ImU32 txtCol = *v ? IM_COL32(218, 218, 218, 255) : IM_COL32(165, 165, 165, 255);
-        dl->AddText(ImVec2(p.x + boxSz + padX + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
+        ImU32 brd = LerpCol(IM_COL32(8, 8, 8, 255), IM_COL32(85, 85, 85, 255), tHov);
+        brd = (brd & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
+                    ImVec2(b1.x + 1.0f, b1.y + 1.0f), brd);
+
+        ImU32 txtCol = LerpCol(IM_COL32(165, 165, 165, 255), IM_COL32(222, 222, 222, 255), std::max(tOn, tHov * 0.6f));
+        txtCol = (txtCol & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        dl->AddText(ImVec2(p.x + boxSz + padX + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(190 * a)), label);
         dl->AddText(ImVec2(p.x + boxSz + padX, p.y), txtCol, label);
         return changed;
     }
 
-    // Слайдер в стиле рефа: подпись сверху, тонкая полоса, лаймовый градиент, цифра на краю заливки.
+    // Слайдер в стиле рефа с плавно скользящей заливкой.
     bool SkeetSliderF(const char* label, const char* id, float* v, float mn, float mx, const char* fmt)
     {
         bool changed = false;
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float a = ImGui::GetStyle().Alpha;
 
         ImVec2 lp = ImGui::GetCursorScreenPos();
-        float xOff = lp.x + 20.0f;  // отступ слева как у текста чекбокса
+        float xOff = lp.x + 20.0f;
         float w    = g_box.innerW - 20.0f;
 
-        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
-        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, 255), label);
+        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(190 * a)), label);
+        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, static_cast<int>(255 * a)), label);
 
         const float labelH = ImGui::GetTextLineHeight();
         const float barY   = lp.y + labelH + 3.0f;
@@ -182,35 +221,43 @@ namespace
         }
         bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
 
+        char animKey[96];
+        std::snprintf(animKey, sizeof(animKey), "%s_frac", id);
+        float targetFrac = std::clamp((*v - mn) / (mx - mn), 0.0f, 1.0f);
+        float visFrac    = ImGui::IsItemActive() ? targetFrac : AnimVal(animKey, targetFrac, 20.0f);
+        if (ImGui::IsItemActive()) g_animState[ImGui::GetID(animKey)] = targetFrac;
+
+        std::snprintf(animKey, sizeof(animKey), "%s_hov", id);
+        float tHov = AnimVal(animKey, hovered ? 1.0f : 0.0f, 18.0f);
+
+        const int a255 = static_cast<int>(255 * a);
         ImVec2 t0(xOff, barY), t1(xOff + w, barY + barH);
         dl->AddRectFilledMultiColor(t0, t1,
-            IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255),
-            IM_COL32(46, 46, 46, 255), IM_COL32(46, 46, 46, 255));
+            IM_COL32(34, 34, 34, a255), IM_COL32(34, 34, 34, a255),
+            IM_COL32(46, 46, 46, a255), IM_COL32(46, 46, 46, a255));
 
-        float frac = std::clamp((*v - mn) / (mx - mn), 0.0f, 1.0f);
-        float fillX = xOff + frac * w;
+        float fillX = xOff + visFrac * w;
         if (fillX > xOff + 1.0f)
         {
             dl->AddRectFilledMultiColor(t0, ImVec2(fillX, barY + barH),
-                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
-                IM_COL32(102, 152, 20, 255), IM_COL32(102, 152, 20, 255));
+                IM_COL32(154, 222, 42, a255), IM_COL32(154, 222, 42, a255),
+                IM_COL32(102, 152, 20, a255), IM_COL32(102, 152, 20, a255));
         }
-        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f),
-                    ImVec2(t1.x + 1.0f, t1.y + 1.0f),
-                    hovered ? IM_COL32(68, 68, 68, 255) : IM_COL32(8, 8, 8, 255));
+        ImU32 brd = LerpCol(IM_COL32(8, 8, 8, 255), IM_COL32(78, 78, 78, 255), tHov);
+        brd = (brd & 0x00FFFFFF) | (static_cast<ImU32>(a255) << 24);
+        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f), ImVec2(t1.x + 1.0f, t1.y + 1.0f), brd);
 
-        // Маленькие '-' и '+' по бокам как на рефе
-        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "-");
-        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "+");
+        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, a255), "-");
+        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, a255), "+");
 
         char buf[32];
         std::snprintf(buf, sizeof(buf), fmt, *v);
         ImVec2 vs = ImGui::CalcTextSize(buf);
         float vx = std::clamp(fillX - vs.x * 0.5f, xOff, xOff + w - vs.x);
         float vy = barY + (barH - vs.y) * 0.5f;
-        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, 255), buf);
-        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, 200), buf);
-        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, 255), buf);
+        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, a255), buf);
+        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, static_cast<int>(200 * a)), buf);
+        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, a255), buf);
 
         ImGui::SetCursorScreenPos(ImVec2(lp.x, barY + barH + 7.0f));
         return changed;
@@ -221,13 +268,14 @@ namespace
         float fv = static_cast<float>(*v);
         bool changed = false;
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float a = ImGui::GetStyle().Alpha;
 
         ImVec2 lp = ImGui::GetCursorScreenPos();
         float xOff = lp.x + 20.0f;
         float w    = g_box.innerW - 20.0f;
 
-        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
-        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, 255), label);
+        dl->AddText(ImVec2(xOff + 1.0f, lp.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(190 * a)), label);
+        dl->AddText(ImVec2(xOff, lp.y), IM_COL32(204, 204, 204, static_cast<int>(255 * a)), label);
 
         const float labelH = ImGui::GetTextLineHeight();
         const float barY   = lp.y + labelH + 3.0f;
@@ -245,25 +293,34 @@ namespace
         }
         bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
 
+        char animKey[96];
+        std::snprintf(animKey, sizeof(animKey), "%s_frac", id);
+        float targetFrac = std::clamp((fv - mn) / static_cast<float>(mx - mn), 0.0f, 1.0f);
+        float visFrac    = ImGui::IsItemActive() ? targetFrac : AnimVal(animKey, targetFrac, 20.0f);
+        if (ImGui::IsItemActive()) g_animState[ImGui::GetID(animKey)] = targetFrac;
+
+        std::snprintf(animKey, sizeof(animKey), "%s_hov", id);
+        float tHov = AnimVal(animKey, hovered ? 1.0f : 0.0f, 18.0f);
+
+        const int a255 = static_cast<int>(255 * a);
         ImVec2 t0(xOff, barY), t1(xOff + w, barY + barH);
         dl->AddRectFilledMultiColor(t0, t1,
-            IM_COL32(34, 34, 34, 255), IM_COL32(34, 34, 34, 255),
-            IM_COL32(46, 46, 46, 255), IM_COL32(46, 46, 46, 255));
+            IM_COL32(34, 34, 34, a255), IM_COL32(34, 34, 34, a255),
+            IM_COL32(46, 46, 46, a255), IM_COL32(46, 46, 46, a255));
 
-        float frac = std::clamp((fv - mn) / static_cast<float>(mx - mn), 0.0f, 1.0f);
-        float fillX = xOff + frac * w;
+        float fillX = xOff + visFrac * w;
         if (fillX > xOff + 1.0f)
         {
             dl->AddRectFilledMultiColor(t0, ImVec2(fillX, barY + barH),
-                IM_COL32(154, 222, 42, 255), IM_COL32(154, 222, 42, 255),
-                IM_COL32(102, 152, 20, 255), IM_COL32(102, 152, 20, 255));
+                IM_COL32(154, 222, 42, a255), IM_COL32(154, 222, 42, a255),
+                IM_COL32(102, 152, 20, a255), IM_COL32(102, 152, 20, a255));
         }
-        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f),
-                    ImVec2(t1.x + 1.0f, t1.y + 1.0f),
-                    hovered ? IM_COL32(68, 68, 68, 255) : IM_COL32(8, 8, 8, 255));
+        ImU32 brd = LerpCol(IM_COL32(8, 8, 8, 255), IM_COL32(78, 78, 78, 255), tHov);
+        brd = (brd & 0x00FFFFFF) | (static_cast<ImU32>(a255) << 24);
+        dl->AddRect(ImVec2(t0.x - 1.0f, t0.y - 1.0f), ImVec2(t1.x + 1.0f, t1.y + 1.0f), brd);
 
-        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "-");
-        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, 255), "+");
+        dl->AddText(ImVec2(xOff - 8.0f, barY - 4.0f), IM_COL32(100, 100, 100, a255), "-");
+        dl->AddText(ImVec2(xOff + w + 3.0f, barY - 4.0f), IM_COL32(100, 100, 100, a255), "+");
 
         char buf[32];
         if (maxText && *v >= mx)
@@ -274,9 +331,9 @@ namespace
         ImVec2 vs = ImGui::CalcTextSize(buf);
         float vx = std::clamp(fillX - vs.x * 0.5f, xOff, xOff + w - vs.x);
         float vy = barY + (barH - vs.y) * 0.5f;
-        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, 255), buf);
-        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, 200), buf);
-        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, 255), buf);
+        dl->AddText(ImVec2(vx + 1.0f, vy + 1.0f), IM_COL32(0, 0, 0, a255), buf);
+        dl->AddText(ImVec2(vx - 1.0f, vy),        IM_COL32(0, 0, 0, static_cast<int>(200 * a)), buf);
+        dl->AddText(ImVec2(vx, vy),               IM_COL32(236, 236, 236, a255), buf);
 
         ImGui::SetCursorScreenPos(ImVec2(lp.x, barY + barH + 7.0f));
         return changed;
@@ -293,28 +350,33 @@ namespace
         bool hovered = ImGui::IsItemHovered();
         bool active  = ImGui::IsItemActive();
 
+        const float a = ImGui::GetStyle().Alpha;
+        char animKey[96];
+        std::snprintf(animKey, sizeof(animKey), "%s_btn", label);
+        float tHov = AnimVal(animKey, active ? 0.0f : (hovered ? 1.0f : 0.35f), 20.0f);
+
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 b0(xOff, p.y), b1(xOff + w, p.y + height);
 
-        ImU32 topC = active  ? IM_COL32(28, 28, 28, 255)
-                   : hovered ? IM_COL32(46, 46, 46, 255)
-                             : IM_COL32(38, 38, 38, 255);
-        ImU32 botC = active  ? IM_COL32(22, 22, 22, 255)
-                   : hovered ? IM_COL32(34, 34, 34, 255)
-                             : IM_COL32(26, 26, 26, 255);
+        ImU32 topC = LerpCol(IM_COL32(28, 28, 28, 255), IM_COL32(48, 48, 48, 255), tHov);
+        ImU32 botC = LerpCol(IM_COL32(20, 20, 20, 255), IM_COL32(34, 34, 34, 255), tHov);
+        topC = (topC & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        botC = (botC & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
 
         dl->AddRectFilledMultiColor(b0, b1, topC, topC, botC, botC);
-        dl->AddRect(b0, b1, IM_COL32(52, 52, 52, 255));
+        ImU32 innerBrd = LerpCol(IM_COL32(46, 46, 46, 255), IM_COL32(78, 92, 42, 255), hovered ? tHov * 0.7f : 0.0f);
+        innerBrd = (innerBrd & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+        dl->AddRect(b0, b1, innerBrd);
         dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
                     ImVec2(b1.x + 1.0f, b1.y + 1.0f),
-                    IM_COL32(8, 8, 8, 255));
+                    IM_COL32(8, 8, 8, static_cast<int>(255 * a)));
 
         if (g_smallBold) ImGui::PushFont(g_smallBold);
         ImVec2 ts = ImGui::CalcTextSize(label);
         float tx = xOff + (w - ts.x) * 0.5f;
         float ty = p.y  + (height - ts.y) * 0.5f;
-        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, 220), label);
-        dl->AddText(ImVec2(tx, ty), IM_COL32(220, 220, 220, 255), label);
+        dl->AddText(ImVec2(tx + 1.0f, ty + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(220 * a)), label);
+        dl->AddText(ImVec2(tx, ty), IM_COL32(220, 220, 220, static_cast<int>(255 * a)), label);
         if (g_smallBold) ImGui::PopFont();
 
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + height + 6.0f));
@@ -328,11 +390,13 @@ namespace
         float xOff = p.x + 20.0f;
         float w    = g_box.innerW - 20.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float a = ImGui::GetStyle().Alpha;
+        const int a255 = static_cast<int>(255 * a);
 
         if (label && label[0])
         {
-            dl->AddText(ImVec2(xOff + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
-            dl->AddText(ImVec2(xOff, p.y), IM_COL32(204, 204, 204, 255), label);
+            dl->AddText(ImVec2(xOff + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(190 * a)), label);
+            dl->AddText(ImVec2(xOff, p.y), IM_COL32(204, 204, 204, a255), label);
             p.y += ImGui::GetTextLineHeight() + 3.0f;
         }
 
@@ -342,27 +406,30 @@ namespace
             ImGui::OpenPopup(id);
         bool hovered = ImGui::IsItemHovered();
 
+        char animKey[96];
+        std::snprintf(animKey, sizeof(animKey), "%s_hov", id);
+        float tHov = AnimVal(animKey, hovered ? 1.0f : 0.0f, 18.0f);
+
         ImVec2 b0(xOff, p.y), b1(xOff + w, p.y + h);
-        dl->AddRectFilledMultiColor(b0, b1,
-            hovered ? IM_COL32(40, 40, 40, 255) : IM_COL32(32, 32, 32, 255),
-            hovered ? IM_COL32(40, 40, 40, 255) : IM_COL32(32, 32, 32, 255),
-            IM_COL32(24, 24, 24, 255), IM_COL32(24, 24, 24, 255));
-        dl->AddRect(b0, b1, IM_COL32(46, 46, 46, 255));
+        ImU32 topC = LerpCol(IM_COL32(32, 32, 32, 255), IM_COL32(42, 42, 42, 255), tHov);
+        topC = (topC & 0x00FFFFFF) | (static_cast<ImU32>(a255) << 24);
+        ImU32 botC = IM_COL32(24, 24, 24, a255);
+        dl->AddRectFilledMultiColor(b0, b1, topC, topC, botC, botC);
+        dl->AddRect(b0, b1, IM_COL32(46, 46, 46, a255));
         dl->AddRect(ImVec2(b0.x - 1.0f, b0.y - 1.0f),
                     ImVec2(b1.x + 1.0f, b1.y + 1.0f),
-                    IM_COL32(8, 8, 8, 255));
+                    IM_COL32(8, 8, 8, a255));
 
         const char* curTxt = (*current >= 0 && *current < count) ? items[*current] : "";
         ImVec2 ts = ImGui::CalcTextSize(curTxt);
         dl->AddText(ImVec2(xOff + 8.0f, p.y + (h - ts.y) * 0.5f),
-                    IM_COL32(190, 190, 190, 255), curTxt);
+                    IM_COL32(196, 196, 196, a255), curTxt);
 
-        // Треугольник стрелки справа
         float ax = b1.x - 11.0f, ay = p.y + h * 0.5f - 1.5f;
         dl->AddTriangleFilled(ImVec2(ax - 3.5f, ay),
                               ImVec2(ax + 3.5f, ay),
                               ImVec2(ax, ay + 4.0f),
-                              IM_COL32(140, 140, 140, 255));
+                              IM_COL32(140, 140, 140, a255));
 
         ImGui::SetNextWindowPos(ImVec2(xOff, p.y + h + 1.0f));
         ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
@@ -392,13 +459,16 @@ namespace
         ImVec2 p = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 vs = ImGui::CalcTextSize(value);
+        const float a = ImGui::GetStyle().Alpha;
+        const int a255 = static_cast<int>(255 * a);
 
-        dl->AddText(ImVec2(p.x + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 190), label);
-        dl->AddText(ImVec2(p.x, p.y), IM_COL32(175, 175, 175, 255), label);
+        dl->AddText(ImVec2(p.x + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(190 * a)), label);
+        dl->AddText(ImVec2(p.x, p.y), IM_COL32(175, 175, 175, a255), label);
 
         float vx = p.x + g_box.innerW - vs.x;
-        dl->AddText(ImVec2(vx + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, 210), value);
-        dl->AddText(ImVec2(vx, p.y), valCol, value);
+        ImU32 vc = (valCol & 0x00FFFFFF) | (static_cast<ImU32>(a255) << 24);
+        dl->AddText(ImVec2(vx + 1.0f, p.y + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(210 * a)), value);
+        dl->AddText(ImVec2(vx, p.y), vc, value);
 
         ImGui::Dummy(ImVec2(g_box.innerW, ImGui::GetTextLineHeight() + 2.0f));
     }
@@ -513,9 +583,9 @@ bool Menu::Create(HINSTANCE hInst, int screenW, int screenH)
     int x = (screenW - m_w) / 2;
     int y = (screenH - m_h) / 2 - 20;
 
-    // WS_EX_NOACTIVATE гарантирует, что меню не крадёт фокус у игры и не сворачивает её.
+    // WS_EX_LAYERED позволяет плавно анимировать прозрачность окна при открытии/закрытии.
     m_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         kMenuClass, L"aim menu", WS_POPUP,
         x, y, m_w, m_h,
         nullptr, nullptr, hInst, nullptr);
@@ -523,6 +593,7 @@ bool Menu::Create(HINSTANCE hInst, int screenW, int screenH)
     if (!m_hwnd)
         return false;
 
+    SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA);
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     if (!CreateDeviceAndSwapChain())
@@ -654,22 +725,16 @@ void Menu::Destroy()
 
 void Menu::SetVisible(bool v, bool grabFocus)
 {
-    m_visible   = v;
     m_grabFocus = grabFocus;
-
-    if (!v)
-    {
-        m_listening    = false;
-        m_listenTarget = nullptr;
-        m_listenActive = false;
-    }
-    if (!m_hwnd)
-        return;
 
     if (v)
     {
-        // Снимаем ограничение курсора, чтобы можно было кликать по меню, не сворачивая игру.
+        m_visible = true;
+        m_closing = false;
+        if (!m_hwnd) return;
+
         ClipCursor(nullptr);
+        SetLayeredWindowAttributes(m_hwnd, 0, static_cast<BYTE>(std::clamp(m_openAnim, 0.05f, 1.0f) * 255.0f), LWA_ALPHA);
 
         if (grabFocus)
         {
@@ -687,7 +752,11 @@ void Menu::SetVisible(bool v, bool grabFocus)
     }
     else
     {
-        ShowWindow(m_hwnd, SW_HIDE);
+        m_listening    = false;
+        m_listenTarget = nullptr;
+        m_listenActive = false;
+        if (m_visible)
+            m_closing = true;   // плавно уезжаем в прозрачность, затем прячем HWND
     }
 }
 
@@ -701,7 +770,6 @@ void Menu::KeyBindTag(int* key, bool allowClear)
 
     ImVec2 ts = ImGui::CalcTextSize(tag);
     ImVec2 cur = ImGui::GetCursorScreenPos();
-    // Ставим в ту же строку справа по ширине бокса
     ImVec2 itemMin = ImGui::GetItemRectMin();
     ImVec2 itemMax = ImGui::GetItemRectMax();
     float tagX = g_box.p0.x + 14.0f + g_box.innerW - ts.x;
@@ -731,11 +799,13 @@ void Menu::KeyBindTag(int* key, bool allowClear)
     if (hovered)
         ImGui::SetTooltip(allowClear ? "ЛКМ — бинд, ПКМ — убрать" : "ЛКМ — переназначить");
 
+    const float a = ImGui::GetStyle().Alpha;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImU32 col = (m_listening && m_listenTarget == key) ? IM_COL32(154, 222, 42, 255)
               : hovered                                ? IM_COL32(220, 220, 220, 255)
                                                        : IM_COL32(125, 125, 125, 255);
-    dl->AddText(ImVec2(tagX + 1.0f, tagY + 1.0f), IM_COL32(0, 0, 0, 200), tag);
+    col = (col & 0x00FFFFFF) | (static_cast<ImU32>(255 * a) << 24);
+    dl->AddText(ImVec2(tagX + 1.0f, tagY + 1.0f), IM_COL32(0, 0, 0, static_cast<int>(200 * a)), tag);
     dl->AddText(ImVec2(tagX, tagY), col, tag);
 
     ImGui::SetCursorScreenPos(cur);
@@ -756,6 +826,26 @@ Menu::Action Menu::Render(AimSettings& s,
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
+    const float dt = ImGui::GetIO().DeltaTime;
+    m_openAnim = SmoothExp(m_openAnim, m_closing ? 0.0f : 1.0f, 18.0f, dt);
+
+    if (m_closing && m_openAnim <= 0.02f)
+    {
+        m_openAnim = 0.0f;
+        m_closing  = false;
+        m_visible  = false;
+        if (m_hwnd)
+            ShowWindow(m_hwnd, SW_HIDE);
+        ImGui::EndFrame();
+        return action;
+    }
+
+    if (m_hwnd)
+    {
+        BYTE winAlpha = static_cast<BYTE>(std::clamp(m_openAnim * 255.0f, 5.0f, 255.0f));
+        SetLayeredWindowAttributes(m_hwnd, 0, winAlpha, LWA_ALPHA);
+    }
+
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(static_cast<float>(m_w), static_cast<float>(m_h)));
     constexpr ImGuiWindowFlags kFlags =
@@ -770,58 +860,99 @@ Menu::Action Menu::Render(AimSettings& s,
     const float W = static_cast<float>(m_w);
     const float H = static_cast<float>(m_h);
 
-    // 1) Двойная тёмная рамка окна (1px чёрная + 1px тёмно-серая + тонкая подсветка)
+    // 1) Двойная тёмная рамка окна
     winDl->AddRect(ImVec2(0, 0), ImVec2(W, H), IM_COL32(8, 8, 8, 255));
     winDl->AddRect(ImVec2(1, 1), ImVec2(W - 1, H - 1), IM_COL32(46, 46, 46, 255));
     winDl->AddRect(ImVec2(2, 2), ImVec2(W - 2, H - 2), IM_COL32(12, 12, 12, 255));
 
-    // 2) Фирменная радужная полоса сверху (плавный градиент во всю ширину)
+    // 2) Плавно переливающаяся радужная полоса сверху
     {
+        static float rainbowPhase = 0.0f;
+        rainbowPhase += dt * 0.35f;
+        if (rainbowPhase > 1.0f) rainbowPhase -= 1.0f;
+
+        auto rgbAt = [&](float u) -> ImU32
+        {
+            float p = std::fmod(u + rainbowPhase, 1.0f) * 3.0f;
+            float r = 0, g = 0, b = 0;
+            if (p < 1.0f)      { r = 55 + 103 * p;      g = 177 - 91 * p;     b = 218 + 6 * p; }
+            else if (p < 2.0f) { float k = p - 1.0f; r = 158 + 59 * k; g = 86 - 18 * k;  b = 224 - 86 * k; }
+            else               { float k = p - 2.0f; r = 217 - 13 * k; g = 68 + 159 * k; b = 138 - 85 * k; }
+            return IM_COL32(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b), 255);
+        };
+
         const float y0 = 3.0f, y1 = 5.0f;
         const float x0 = 3.0f, x1 = W - 3.0f;
-        const float seg = (x1 - x0) / 3.0f;
-        const ImU32 c0 = IM_COL32(55,  177, 218, 255);
-        const ImU32 c1 = IM_COL32(158,  86, 224, 255);
-        const ImU32 c2 = IM_COL32(217,  68, 138, 255);
-        const ImU32 c3 = IM_COL32(204, 227,  53, 255);
-        winDl->AddRectFilledMultiColor(ImVec2(x0,           y0), ImVec2(x0 + seg,     y1), c0, c1, c1, c0);
-        winDl->AddRectFilledMultiColor(ImVec2(x0 + seg,     y0), ImVec2(x0 + seg * 2, y1), c1, c2, c2, c1);
-        winDl->AddRectFilledMultiColor(ImVec2(x0 + seg * 2, y0), ImVec2(x1,           y1), c2, c3, c3, c2);
+        constexpr int kSegs = 12;
+        const float seg = (x1 - x0) / kSegs;
+        for (int i = 0; i < kSegs; ++i)
+        {
+            ImU32 cl = rgbAt(static_cast<float>(i) / kSegs);
+            ImU32 cr = rgbAt(static_cast<float>(i + 1) / kSegs);
+            winDl->AddRectFilledMultiColor(
+                ImVec2(x0 + seg * i, y0), ImVec2(x0 + seg * (i + 1), y1),
+                cl, cr, cr, cl);
+        }
         winDl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), IM_COL32(8, 8, 8, 255));
     }
 
-    // 3) Сайдбар слева (как на рефе: узкая вертикальная колонка с крупными иконками)
-    static int section    = 0;
-    static int presetIdx  = 0;
-    static float flashT   = 0.0f;
+    // 3) Сайдбар слева с плавно скользящей подсветкой активной вкладки
+    static int   section      = 0;
+    static int   prevSection  = 0;
+    static float tabSlideY    = -1.0f;
+    static float contentAlpha = 1.0f;
+    static float contentSlide = 0.0f;
+    static int   presetIdx    = 0;
+    static float flashT       = 0.0f;
     static const char* flashMsg = "";
 
+    if (flashT > 0.0f) flashT = (flashT > dt) ? (flashT - dt) : 0.0f;
+
+    if (section != prevSection)
     {
-        float dt = ImGui::GetIO().DeltaTime;
-        if (flashT > 0.0f) flashT = (flashT > dt) ? (flashT - dt) : 0.0f;
+        contentAlpha = 0.0f;
+        contentSlide = 10.0f;
+        prevSection  = section;
     }
+    contentAlpha = SmoothExp(contentAlpha, 1.0f, 16.0f, dt);
+    contentSlide = SmoothExp(contentSlide, 0.0f, 16.0f, dt);
 
     constexpr float kSideW = 74.0f;
     const float contentTop = 6.0f;
     const float bodyH      = H - contentTop - 3.0f;
+    const float tabStartY  = contentTop + 26.0f;
+    const float tabH       = 72.0f;
 
-    // Фон сайдбара
+    if (tabSlideY < 0.0f) tabSlideY = tabStartY + section * tabH;
+    tabSlideY = SmoothExp(tabSlideY, tabStartY + section * tabH, 18.0f, dt);
+
+    // Фон сайдбара + разделитель
     winDl->AddRectFilled(ImVec2(3.0f, contentTop), ImVec2(3.0f + kSideW, H - 3.0f),
                          IM_COL32(12, 12, 12, 255));
-    // Вертикальный разделитель
     winDl->AddLine(ImVec2(3.0f + kSideW, contentTop), ImVec2(3.0f + kSideW, H - 3.0f),
                    IM_COL32(38, 38, 38, 255));
+
+    // Скользящий блок активной вкладки (вырез в рамке)
+    {
+        float ay0 = tabSlideY;
+        float ay1 = ay0 + tabH;
+        winDl->AddRectFilled(ImVec2(3.0f, ay0), ImVec2(3.0f + kSideW + 1.0f, ay1),
+                             IM_COL32(17, 17, 17, 255));
+        winDl->AddLine(ImVec2(3.0f, ay0), ImVec2(3.0f + kSideW, ay0), IM_COL32(38, 38, 38, 255));
+        winDl->AddLine(ImVec2(3.0f, ay1), ImVec2(3.0f + kSideW, ay1), IM_COL32(38, 38, 38, 255));
+        winDl->AddLine(ImVec2(3.0f, ay0 + 1.0f), ImVec2(3.0f + kSideW, ay0 + 1.0f), IM_COL32(8, 8, 8, 255));
+        winDl->AddLine(ImVec2(3.0f, ay1 - 1.0f), ImVec2(3.0f + kSideW, ay1 - 1.0f), IM_COL32(8, 8, 8, 255));
+        // Тонкий лаймовый акцент слева от активной вкладки
+        winDl->AddRectFilled(ImVec2(3.0f, ay0 + 14.0f), ImVec2(5.0f, ay1 - 14.0f),
+                             IM_COL32(140, 206, 36, 220));
+    }
 
     const char* kTabs[4]  = { "Аимбот", "Визуал", "Настройки", "Инфо" };
     const char* kIcons[4] = { ICON_AIM, ICON_VISUAL, ICON_GEARS, ICON_USER };
 
-    const float tabStartY = contentTop + 26.0f;
-    const float tabH      = 72.0f;
-
     for (int i = 0; i < 4; ++i)
     {
         float ty0 = tabStartY + i * tabH;
-        float ty1 = ty0 + tabH;
         ImGui::SetCursorScreenPos(ImVec2(3.0f, ty0));
         char tid[16];
         std::snprintf(tid, sizeof(tid), "##tab%d", i);
@@ -830,23 +961,14 @@ Menu::Action Menu::Render(AimSettings& s,
         bool hovered = ImGui::IsItemHovered();
         bool active  = (section == i);
 
-        if (active)
-        {
-            // Вырез в рамке как в Skeet: фон совпадает с основной областью
-            winDl->AddRectFilled(ImVec2(3.0f, ty0), ImVec2(3.0f + kSideW + 1.0f, ty1),
-                                 IM_COL32(17, 17, 17, 255));
-            winDl->AddLine(ImVec2(3.0f, ty0), ImVec2(3.0f + kSideW, ty0), IM_COL32(38, 38, 38, 255));
-            winDl->AddLine(ImVec2(3.0f, ty1), ImVec2(3.0f + kSideW, ty1), IM_COL32(38, 38, 38, 255));
-            winDl->AddLine(ImVec2(3.0f, ty0 + 1.0f), ImVec2(3.0f + kSideW, ty0 + 1.0f), IM_COL32(8, 8, 8, 255));
-            winDl->AddLine(ImVec2(3.0f, ty1 - 1.0f), ImVec2(3.0f + kSideW, ty1 - 1.0f), IM_COL32(8, 8, 8, 255));
-        }
+        char animKey[24];
+        std::snprintf(animKey, sizeof(animKey), "tab_col_%d", i);
+        float tCol = AnimVal(animKey, active ? 1.0f : (hovered ? 0.45f : 0.0f), 16.0f);
 
         const char* lbl = g_iconFont ? kIcons[i] : kTabs[i];
         if (g_iconFont) ImGui::PushFont(g_iconFont);
         ImVec2 is = ImGui::CalcTextSize(lbl);
-        ImU32 col = active  ? IM_COL32(236, 236, 236, 255)
-                  : hovered ? IM_COL32(150, 150, 150, 255)
-                            : IM_COL32(88,  88,  88,  255);
+        ImU32 col = LerpCol(IM_COL32(88, 88, 88, 255), IM_COL32(238, 238, 238, 255), tCol);
         float ix = 3.0f + (kSideW - is.x) * 0.5f;
         float iy = ty0  + (tabH  - is.y) * 0.5f;
         winDl->AddText(ImVec2(ix + 1.0f, iy + 1.0f), IM_COL32(0, 0, 0, 220), lbl);
@@ -857,30 +979,32 @@ Menu::Action Menu::Render(AimSettings& s,
             ImGui::SetTooltip("%s", kTabs[i]);
     }
 
-    // Маленькая кнопка закрытия '×' в правом верхнем углу (и по N / Insert)
+    // Кнопка закрытия '×'
     {
         float bsz = 20.0f;
         ImVec2 cp(W - bsz - 8.0f, 9.0f);
         ImGui::SetCursorScreenPos(cp);
         ImGui::InvisibleButton("##close", ImVec2(bsz, bsz));
         bool ch = ImGui::IsItemHovered();
+        float tClose = AnimVal("close_hov", ch ? 1.0f : 0.0f, 20.0f);
         ImVec2 xs = ImGui::CalcTextSize("×");
         winDl->AddText(ImVec2(cp.x + (bsz - xs.x) * 0.5f, cp.y + (bsz - xs.y) * 0.5f),
-                       ch ? IM_COL32(240, 90, 90, 255) : IM_COL32(115, 115, 115, 255), "×");
+                       LerpCol(IM_COL32(115, 115, 115, 255), IM_COL32(240, 90, 90, 255), tClose), "×");
         if (ImGui::IsItemClicked())
             SetVisible(false, m_grabFocus);
     }
 
-    // 4) Контентная область (2 колонки групбоксов, как в референсе)
+    // 4) Контентная область с плавным fade-in + slide при смене вкладки
     const float contentX = 3.0f + kSideW + 18.0f;
     const float contentW = W - contentX - 18.0f;
     const float colGap   = 16.0f;
     const float colW     = (contentW - colGap) * 0.5f;
 
-    ImGui::SetCursorScreenPos(ImVec2(contentX, contentTop + 18.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, contentAlpha);
+    ImGui::SetCursorScreenPos(ImVec2(contentX, contentTop + 18.0f + contentSlide));
     ImGui::BeginChild("##content", ImVec2(contentW + 8.0f, bodyH - 22.0f), false);
 
-    const ImVec2 base = ImGui::GetCursorScreenPos();
+    const ImVec2 base   = ImGui::GetCursorScreenPos();
     const float  leftX  = base.x;
     const float  rightX = base.x + colW + colGap;
 
@@ -888,11 +1012,13 @@ Menu::Action Menu::Render(AimSettings& s,
     {
     case 0:   // АИМБОТ
     {
-        // --- Левая колонка ---
         ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
         BeginGroupBox("Aimbot", colW);
         SkeetCheck("##aim_en", "Включить аим", &s.aimEnabled);
         KeyBindTag(&s.aimKey1, false);
+        SkeetCheck("##aim_sticky", "Лок на одной цели", &s.stickyLock);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Держит одну цель, пока она жива в FOV (не прыгает на других).\nКогда цель умирает/пропадает — автосвап на следующую без отпускания клавиши.");
         ImGui::Dummy(ImVec2(0, 4));
         SkeetSliderI("FOV аима", "##aimFov", &s.aimFov,
                      AimSettings::AIMFOV_MIN, AimSettings::AIMFOV_MAX, "%d px");
@@ -906,9 +1032,12 @@ Menu::Action Menu::Render(AimSettings& s,
                      AimSettings::DZ_MIN, AimSettings::DZ_MAX, "%.0f px");
         EndGroupBox();
 
-        // --- Правая колонка ---
         ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
         BeginGroupBox("Target & Detection", colW);
+        {
+            const char* kHeadModes[3] = { "Голова -> тело", "Только голова", "Только тело" };
+            SkeetCombo("##headMode", "Режим наведения", &s.headMode, kHeadModes, 3);
+        }
         SkeetSliderF("Высота точки (тело)", "##headFrac", &s.headFrac,
                      AimSettings::HD_MIN, AimSettings::HD_MAX, "%.2f");
         SkeetSliderF("Порог головы", "##headConf", &s.headConf,
@@ -926,12 +1055,12 @@ Menu::Action Menu::Render(AimSettings& s,
         BeginGroupBox("Keybinds", colW);
         {
             ImVec2 rp = ImGui::GetCursorScreenPos();
-            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "Основная клавиша");
+            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, contentAlpha), "Основная клавиша");
             KeyBindTag(&s.aimKey1, false);
             ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + ImGui::GetTextLineHeight() + 6.0f));
 
             rp = ImGui::GetCursorScreenPos();
-            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "Доп. клавиша");
+            ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, contentAlpha), "Доп. клавиша");
             KeyBindTag(&s.aimKey2, true);
             ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + ImGui::GetTextLineHeight() + 4.0f));
         }
@@ -944,6 +1073,7 @@ Menu::Action Menu::Render(AimSettings& s,
         ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
         BeginGroupBox("ESP & Overlay", colW);
         SkeetCheck("##v_boxes", "Боксы целей", &s.showBoxes);
+        SkeetCheck("##v_heads", "Боксы голов", &s.showHeadBoxes);
         SkeetCheck("##v_line",  "Линия до цели", &s.showLine);
         SkeetCheck("##v_cross", "Крестик по центру", &s.showCrosshair);
         SkeetCheck("##v_fov",   "Квадрат зоны наводки", &s.showFov);
@@ -952,8 +1082,12 @@ Menu::Action Menu::Render(AimSettings& s,
 
         ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
         BeginGroupBox("Performance", colW);
+        SkeetSliderI("Лимит DET FPS (YOLO)", "##detMaxFps", &s.detMaxFps,
+                     AimSettings::DETFPS_MIN, AimSettings::DETFPS_MAX, "%d fps", "Без лимита");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Ограничивает нагрузку DirectML на видеокарту.\n100-120 fps обычно убирают фризы игры без потери плавности аима.");
         SkeetSliderI("Лимит UI FPS", "##uiMaxFps", &s.uiMaxFps,
-                     AimSettings::UIFPS_MIN, AimSettings::UIFPS_MAX, "%d fps", "Без лимита");
+                     AimSettings::UIFPS_MIN, AimSettings::UIFPS_MAX, "%d fps", "240 fps");
         ImGui::Dummy(ImVec2(0, 2));
         SkeetCheck("##v_grab", "Перехват фокуса (для курсора)", &s.grabFocus);
         if (ImGui::IsItemHovered())
@@ -962,7 +1096,7 @@ Menu::Action Menu::Render(AimSettings& s,
         break;
     }
 
-    case 2:   // НАСТРОЙКИ И ПРЕСЕТЫ (как на референсе)
+    case 2:   // НАСТРОЙКИ И ПРЕСЕТЫ
     {
         ImGui::SetCursorScreenPos(ImVec2(leftX, base.y + 6.0f));
         BeginGroupBox("Miscellaneous", colW);
@@ -971,6 +1105,7 @@ Menu::Action Menu::Render(AimSettings& s,
         SkeetCheck("##m_aim",   "Aimbot active", &s.aimEnabled);
         KeyBindTag(&s.aimKey1, false);
         SkeetCheck("##m_boxes", "Show player boxes", &s.showBoxes);
+        SkeetCheck("##m_heads", "Show head boxes", &s.showHeadBoxes);
         SkeetCheck("##m_line",  "Show snapline", &s.showLine);
         SkeetCheck("##m_fov",   "Show FOV square", &s.showFov);
         SkeetCheck("##m_log",   "Show debug HUD", &s.showLog);
@@ -990,7 +1125,6 @@ Menu::Action Menu::Render(AimSettings& s,
         }
         EndGroupBox();
 
-        // Правая колонка: Settings + Presets (1-в-1 компоновка скрина)
         ImGui::SetCursorScreenPos(ImVec2(rightX, base.y + 6.0f));
         BeginGroupBox("Settings", colW);
         {
@@ -1054,7 +1188,8 @@ Menu::Action Menu::Render(AimSettings& s,
             if (flashT > 0.0f)
             {
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
-                ImGui::TextColored(ImVec4(0.60f, 0.87f, 0.16f, 1.0f), "%s", flashMsg);
+                ImGui::TextColored(ImVec4(0.60f, 0.87f, 0.16f, std::min(1.0f, flashT * 2.0f) * contentAlpha),
+                                   "%s", flashMsg);
             }
         }
         EndGroupBox();
@@ -1090,7 +1225,7 @@ Menu::Action Menu::Render(AimSettings& s,
         SkeetInfoRow("Выгрузить софт",   "F8",         IM_COL32(215, 215, 215, 255));
         ImGui::Dummy(ImVec2(0, 4));
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + g_box.innerW);
-        ImGui::TextColored(ImVec4(0.58f, 0.58f, 0.58f, 1.0f),
+        ImGui::TextColored(ImVec4(0.58f, 0.58f, 0.58f, contentAlpha),
             "Для отображения поверх игры без сворачивания используй в игре режим "
             "\"Без рамок\" (Borderless / Fullscreen Window).");
         ImGui::PopTextWrapPos();
@@ -1100,9 +1235,10 @@ Menu::Action Menu::Render(AimSettings& s,
     }
 
     ImGui::EndChild();
+    ImGui::PopStyleVar(); // Alpha
     ImGui::End();
 
-    // Ребинд клавиш: снимок зажатых, затем ловим новое нажатие.
+    // Ребинд клавиш
     if (m_listening && m_listenTarget)
     {
         if (!m_listenActive)
